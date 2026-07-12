@@ -209,12 +209,12 @@ async function driveSetup(page, pid) {
   const role = roleLabel.toLowerCase().includes('non') ? 'nonexpert' : 'expert'
   log(pid, `info: "${roleLabel}" (${role})`)
 
-  // (4) Info-document phase: the role sheet link is present with the role-correct href.
+  // (4) Info-document phase (Part 2): BOTH roles point at the ONE shared case PDF, eBay.pdf.
   const sheetLink = page.locator('a', { hasText: 'Role sheet' }).first()
   await sheetLink.waitFor({ timeout: 15_000 })
   const href = await sheetLink.getAttribute('href')
-  assert(href === `/role-info/${role}.pdf`,
-    `Info doc — ${role} sees its own role sheet link (href=${href})`)
+  assert(href === '/role-info/eBay.pdf',
+    `Info doc — ${role} role sheet link points at the shared eBay.pdf (href=${href})`)
 
   await page.click('button:has-text("Continue")')
 
@@ -465,12 +465,17 @@ async function main() {
   assert(expertCount === 2 && nonexpertCount === 6,
     `Roles assigned — 8 students → 2 expert + 6 nonexpert (got ${expertCount} + ${nonexpertCount})`)
 
-  // (4) The role sheet files must RESOLVE over the frontend origin (not 404 / SPA fallback).
-  for (const role of ['expert', 'nonexpert']) {
-    const r  = await fetch(`${FE}/role-info/${role}.pdf`)
-    const ct = r.headers.get('content-type') ?? ''
-    assert(r.status === 200 && !ct.includes('text/html'),
-      `Info doc — /role-info/${role}.pdf resolves as a real file [${r.status} ${ct}]`)
+  // (4) The ONE shared case PDF must RESOLVE over the frontend origin (not 404 / SPA fallback).
+  const pdf = await fetch(`${FE}/role-info/eBay.pdf`)
+  const pdfCt = pdf.headers.get('content-type') ?? ''
+  assert(pdf.status === 200 && !pdfCt.includes('text/html'),
+    `Info doc — the shared /role-info/eBay.pdf resolves as a real file [${pdf.status} ${pdfCt}]`)
+  // The removed Part-1 placeholders must be GONE (not lingering as real files).
+  for (const gone of ['expert', 'nonexpert']) {
+    const g = await fetch(`${FE}/role-info/${gone}.pdf`)
+    const gCt = g.headers.get('content-type') ?? ''
+    assert(!(g.status === 200 && !gCt.includes('text/html')),
+      `Info doc — removed placeholder /role-info/${gone}.pdf no longer resolves as a real file [${g.status} ${gCt}]`)
   }
   const bad   = await fetch(`${FE}/role-info/__nope__.pdf`)
   const badCt = bad.headers.get('content-type') ?? ''

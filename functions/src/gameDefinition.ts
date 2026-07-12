@@ -98,9 +98,11 @@ export const ebayGameDef: GameDefinition = {
     { key: 'nonexpert_role_name',         kind: 'string',      default: 'Non-Expert' },
     { key: 'expert_reservation_price',    kind: 'positiveInt', default: 0 },
     { key: 'nonexpert_reservation_price', kind: 'positiveInt', default: 0 },
-    // Placeholder PDF URL fields — Elena drops real PDFs in public/role-info/ (Part 2)
-    { key: 'expert_sheet_url',            kind: 'url',         default: '/role-info/expert.pdf' },
-    { key: 'nonexpert_sheet_url',         kind: 'url',         default: '/role-info/nonexpert.pdf' },
+    // Part 2: ONE shared case/instructions PDF for BOTH roles (the case text covers the
+    // expert and non-expert situations). Per-participant private numbers are NOT in the PDF —
+    // they come from the endowment shown in-game (Part 3).
+    { key: 'expert_sheet_url',            kind: 'url',         default: '/role-info/eBay.pdf' },
+    { key: 'nonexpert_sheet_url',         kind: 'url',         default: '/role-info/eBay.pdf' },
   ],
 
   // Info page links — keys must appear in configFields above
