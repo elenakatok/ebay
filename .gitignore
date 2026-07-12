@@ -50,3 +50,6 @@ yarn-error.log*
 
 # Local emulator state
 emulator-data/
+
+# Play-through harness diagnostics (screenshots on failure)
+playthrough-artifacts/

@@ -1,0 +1,607 @@
+/**
+ * eBay PART 1 skeleton — EMULATOR play-through (Playwright, real browser).
+ *
+ * A UI-driven regression harness for the Part 1 blank canvas. 8 students → two
+ * groups of { expert:1, nonexpert:3 }. Adapted from Baxter's baxter-playthrough.mjs
+ * (emulator-based, driven instructor gates), retargeted to eBay's single-round
+ * skeleton. Students bootstrap via the DEV `?_pid=&_gid=` _test bypass; the
+ * instructor is driven via the REAL dashboard buttons (Generate Code / Match Now /
+ * the deadlock-override control / Score & Record); all reads hit the emulator
+ * Firestore REST endpoint with `Bearer owner`.
+ *
+ * NON-NEGOTIABLE (Baxter lessons baked in):
+ *  • Every student state transition is driven by CLICKING THE ACTUAL BUTTON /
+ *    FILLING THE ACTUAL FIELD in the browser — never a backend/API call. (A Baxter
+ *    bug survived fix attempts because Playwright called the function, not the button.)
+ *  • Instructor gates are driven through the real dashboard UI too.
+ *  • CLEAN-START UNCONDITIONALLY: this harness tears down + rebuilds the whole local
+ *    stack (functions build → emulators → Vite) at the start of every run. No port probe.
+ *  • The gradebook push is OBSERVED for real: a mock classroom callback is wired via
+ *    functions/.env.local BEFORE the emulator boots, so the dashboard "Score & Record"
+ *    button's real POST lands on it (POST + 200 asserted). Nothing is stubbed to pass.
+ *
+ * COVERAGE (student launch → grade push):
+ *   1. Instructor: dashboard loads, roster visible (8 students).
+ *   2. Both roles launch, correct role assigned.
+ *   3. KC stub for both roles: role gate + graded MC (✓ Correct) + reflection.
+ *   4. Info-document phase: the role sheet link is present AND resolves for both roles.
+ *   5. Matching: two groups form as { expert:1, nonexpert:3 }.
+ *   6. Outcome: a `price` deal is accepted + persisted (schema-valid).
+ *   7. Deadlock override: the dashboard control submits { price } (NOT { placeholder }) —
+ *      locks in the Part-1 fix of the latent Hawks-scaffold bug.
+ *   8. Finalize: Score & Record → stub scoring runs → real grade push fires (POST + 200).
+ *
+ * ── ONE-COMMAND RUN ──────────────────────────────────────────────────────────
+ *   From the eBay repo root (where playwright resolves):
+ *     cd games/ebay && node ebay-playthrough.mjs
+ *   Env: HEADED=1 to watch the browsers; SLOWMO=80 to slow clicks.
+ *   (one-time: `npm install` at games/ebay to install the declared playwright devDependency)
+ */
+
+import { chromium } from 'playwright'
+import { mkdirSync, writeFileSync, openSync } from 'node:fs'
+import { createServer } from 'node:http'
+import { spawn, execSync } from 'node:child_process'
+import { setTimeout as sleep } from 'node:timers/promises'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+// ── Config ─────────────────────────────────────────────────────────────────────
+
+const PROJECT   = 'ebay-mygames-live'
+const ROOT      = path.dirname(fileURLToPath(import.meta.url))
+const FE        = process.env.FE_BASE ?? 'http://localhost:5173'
+const FUNCTIONS = process.env.FN_BASE ?? `http://localhost:5005/${PROJECT}/us-central1`
+const FIRESTORE = process.env.FS_BASE ?? `http://localhost:8082/v1/projects/${PROJECT}/databases/(default)/documents`
+const HEADED    = process.env.HEADED === '1'
+const SLOWMO    = process.env.SLOWMO ? Number(process.env.SLOWMO) : 0
+
+// Emulator + Vite ports (source: firebase.json emulators block + Vite default).
+const PORTS = [9101, 5005, 8082, 9002, 5006, 4002, 5173]
+
+// A fresh instance id per run so re-runs never collide.
+const GID  = process.env.GID ?? `pt-${Date.now()}`
+const PIDS = Array.from({ length: 8 }, (_, i) => `stu-${i + 1}`)
+
+// eBay KC gate radio labels (correct answer for the assigned-role gate = own role).
+const GATE_RADIO = {
+  expert:    'Expert — you can appraise the item accurately',
+  nonexpert: 'Non-Expert — you bid without expert appraisal',
+}
+// The single graded stub MC — correct option label (server-marked correct_value 'a').
+const KC_CORRECT_MC = "This one (the stub’s correct answer)."
+
+// Placeholder prices: happy-path group vs deadlock-override group.
+const HAPPY_PRICE    = 500
+const DEADLOCK_PRICE = 777
+
+// ── Tiny test harness ──────────────────────────────────────────────────────────
+
+let PASS = 0, FAIL = 0
+const log    = (tag, msg) => console.log(`[${tag}] ${msg}`)
+const banner = msg => console.log('\n' + '─'.repeat(66) + '\n' + msg + '\n' + '─'.repeat(66))
+function assert(cond, name) {
+  if (cond) { PASS++; console.log(`  ✓ ASSERT: ${name}`) }
+  else      { FAIL++; console.log(`  ✗ ASSERT FAILED: ${name}`) }
+}
+
+// ── On-failure diagnostics (never affects pass/fail) ────────────────────────────
+
+let browser = null
+const students = []      // { page, pid, role }
+let dash = null          // instructor dashboard page
+const ARTIFACT_DIR = path.resolve(ROOT, 'playthrough-artifacts', GID)
+
+async function headingText(page) {
+  try {
+    const hs = (await page.locator('h1').allTextContents()).map(h => h.trim()).filter(Boolean)
+    return hs.length ? hs.join(' | ') : '(no <h1> visible)'
+  } catch { return '(could not read <h1>)' }
+}
+async function dumpDiagnostics(reason) {
+  console.log('\n' + '═'.repeat(66) + '\nDIAGNOSTIC DUMP — ' + reason + '\n' + '═'.repeat(66))
+  try { mkdirSync(ARTIFACT_DIR, { recursive: true }) } catch { /* best effort */ }
+  const targets = [
+    ...students.map(s => ({ label: s.pid, page: s.page })),
+    ...(dash ? [{ label: 'dashboard', page: dash }] : []),
+  ]
+  for (const { label, page } of targets) {
+    if (!page) continue
+    const heading = await headingText(page)
+    let url = '(unknown)'; try { url = page.url() } catch { /* closed */ }
+    let shot = path.join(ARTIFACT_DIR, `${label}.png`)
+    try { await page.screenshot({ path: shot, fullPage: true }) } catch (e) { shot = `(screenshot failed: ${e.message})` }
+    console.log(`  [${label}]  heading: ${heading}`)
+    console.log(`  ${' '.repeat(label.length)}   url: ${url}`)
+    console.log(`  ${' '.repeat(label.length)}   shot: ${shot}`)
+  }
+  console.log('═'.repeat(66) + '\n')
+}
+
+// ── Firestore REST helpers (emulator; owner auth bypasses rules) ────────────────
+
+async function fsGetDocs(collection) {
+  const res = await fetch(`${FIRESTORE}/game_instances/${GID}/${collection}?pageSize=100`, {
+    headers: { Authorization: 'Bearer owner' },
+  })
+  if (!res.ok) return []
+  return (await res.json()).documents ?? []
+}
+async function fsGetDoc(pathSuffix) {
+  const res = await fetch(`${FIRESTORE}/game_instances/${GID}/${pathSuffix}`, {
+    headers: { Authorization: 'Bearer owner' },
+  })
+  if (!res.ok) return null
+  return res.json()
+}
+const strVal = f => f?.stringValue ?? ''
+const numVal = f => (f?.integerValue != null ? parseInt(f.integerValue, 10) : (f?.doubleValue ?? null))
+const arrVal = f => (f?.arrayValue?.values ?? []).map(v => v.stringValue)
+
+async function readParticipants() {
+  const docs = await fsGetDocs('participants')
+  return docs.map(d => ({
+    id:               d.name.split('/').pop(),
+    role:             strVal(d.fields?.role),
+    is_lead:          d.fields?.is_lead?.booleanValue ?? false,
+    group_id:         strVal(d.fields?.group_id),
+    raw_score:        numVal(d.fields?.raw_score),
+    normalized_score: numVal(d.fields?.normalized_score),
+    knowledge_check_score: numVal(d.fields?.knowledge_check_score),
+  }))
+}
+async function readGroups() {
+  const docs = await fsGetDocs('groups')
+  return docs.map(d => {
+    const outcome = d.fields?.outcome?.mapValue?.fields
+    return {
+      id:        d.name.split('/').pop(),
+      status:    strVal(d.fields?.status),
+      agreement: d.fields?.agreement_reached?.booleanValue ?? null,
+      expert:    arrVal(d.fields?.expert_participants),
+      nonexpert: arrVal(d.fields?.nonexpert_participants),
+      lead:      strVal(d.fields?.lead_participant_id),
+      // The placeholder outcome: single `price` decimal (+ optional notes).
+      price:     outcome?.price != null ? numVal(outcome.price) : null,
+      hasOutcome: outcome != null,
+    }
+  })
+}
+async function pollGroups(pred, maxMs = 30_000) {
+  const start = Date.now()
+  while (Date.now() - start < maxMs) {
+    const gs = await readGroups()
+    if (gs.length && pred(gs)) return gs
+    await sleep(700)
+  }
+  return readGroups()
+}
+async function readAttendanceCode() {
+  const doc = await fsGetDoc('attendance_code/current')
+  return doc?.fields?.code?.stringValue ?? null
+}
+
+// ── Student / dashboard URLs (DEV bypasses) ─────────────────────────────────────
+
+const studentUrl   = pid => `${FE}/?_pid=${pid}&_gid=${GID}&_session=tab`
+const dashboardUrl = () => `${FE}/dashboard?_dev_game_instance_id=${encodeURIComponent(GID)}&_session=tab`
+
+// ── Phase 1: info → KC gate → graded MC → reflection → hold (per student) ───────
+
+// The assignRole endpoint runs a Firestore transaction on ONE shared role_counts doc. The
+// Firestore EMULATOR locks pessimistically with a short timeout, so concurrent assignRole calls
+// cascade into "10 ABORTED: Transaction lock timeout" (and reload-retries pile on more). So the
+// role-assignment step is driven SEQUENTIALLY (below), one student at a time → zero contention.
+// A light retry still covers a cold first worker. Everything AFTER the role page (KC/prep, which
+// write per-participant docs — no shared-doc transaction) is driven concurrently.
+async function ensureOnRolePage(page, pid) {
+  let onRole = false
+  for (let attempt = 1; attempt <= 6 && !onRole; attempt++) {
+    await page.goto(studentUrl(pid))
+    onRole = await page.waitForSelector('p:has-text("Your role")', { timeout: 20_000 }).then(() => true).catch(() => false)
+    if (!onRole) { log(pid, `role-assign attempt ${attempt} not ready — reloading`); await sleep(1500) }
+  }
+  if (!onRole) throw new Error(`${pid} never reached the role page`)
+}
+
+async function driveSetup(page, pid) {
+  const roleLabel = ((await page.locator('h1').first().textContent()) ?? '').trim()
+  const role = roleLabel.toLowerCase().includes('non') ? 'nonexpert' : 'expert'
+  log(pid, `info: "${roleLabel}" (${role})`)
+
+  // (4) Info-document phase: the role sheet link is present with the role-correct href.
+  const sheetLink = page.locator('a', { hasText: 'Role sheet' }).first()
+  await sheetLink.waitFor({ timeout: 15_000 })
+  const href = await sheetLink.getAttribute('href')
+  assert(href === `/role-info/${role}.pdf`,
+    `Info doc — ${role} sees its own role sheet link (href=${href})`)
+
+  await page.click('button:has-text("Continue")')
+
+  // (3) KC role gate (assigned_role; correct answer = own role → must pass to proceed).
+  await page.waitForSelector('text=What is your role in this auction?', { timeout: 30_000 })
+  await page.getByRole('radio', { name: GATE_RADIO[role], exact: true }).click()
+  await page.click('button:has-text("Submit")')
+
+  // (3) ONE graded stub MC — click the correct option → assert ✓ Correct → Continue.
+  await page.waitForSelector('p:has-text("Concept check — 1 of 1")', { timeout: 30_000 })
+  await page.getByRole('radio', { name: KC_CORRECT_MC }).click()
+  await page.click('button:has-text("Submit")')
+  const gotCorrect = await page.waitForSelector('text=✓ Correct', { timeout: 15_000 })
+    .then(() => true).catch(() => false)
+  assert(gotCorrect, `KC/${role} — graded stub MC marks the correct option ✓ Correct`)
+  await page.click('button:has-text("Continue")')
+
+  // Reflection (ungraded free text).
+  await page.waitForSelector('p:has-text("Preparation — 1 of 1")', { timeout: 30_000 })
+  await page.locator('textarea').fill(`${role} plan: bid to my value, avoid the winner's curse.`)
+  await page.click('button:has-text("Complete")')
+
+  await page.waitForSelector('h1:has-text("Preparation complete")', { timeout: 30_000 })
+  log(pid, '◆ hold screen')
+  return { page, pid, role }
+}
+
+// ── Phase 1b: hold → confirmation → attendance code → waiting room ──────────────
+
+async function driveToWaiting(s, code) {
+  const { page, pid } = s
+  await page.click('button:has-text("in class")')
+  await page.waitForSelector('h1:has-text("Ready to negotiate?")', { timeout: 20_000 })
+  await page.click("button:has-text(\"Yes, I'm ready\")")
+  await page.waitForSelector('h1:has-text("Enter attendance code")', { timeout: 20_000 })
+  await page.locator('input').fill(code)
+  await page.click('button[type="submit"]')
+  await page.waitForSelector('h1:has-text("Waiting to be matched")', { timeout: 30_000 })
+  log(pid, '★ waiting room')
+}
+
+// ── Group reveal → off-platform → (report form ready) ───────────────────────────
+
+async function startGroupToReport(members) {
+  // One "Start negotiation" click → the rest auto-advance to "Go negotiate".
+  await members[0].page.waitForSelector('h1:has-text("Your negotiation group")', { timeout: 60_000 })
+  await members[0].page.click('button:has-text("Start negotiation")')
+  await members[0].page.waitForSelector('h1:has-text("Go negotiate")', { timeout: 20_000 })
+  for (const m of members.slice(1)) {
+    const flipped = await m.page.waitForSelector('h1:has-text("Go negotiate")', { timeout: 15_000 })
+      .then(() => true).catch(() => false)
+    if (!flipped) { await m.page.click('button:has-text("Start negotiation")'); await m.page.waitForSelector('h1:has-text("Go negotiate")', { timeout: 15_000 }) }
+  }
+  // Everyone taps "We've finished — report our outcome".
+  await Promise.all(members.map(m => m.page.click("button:has-text(\"We've finished\")").catch(() => {})))
+}
+
+/** Lead fills the placeholder price + submits a deal; non-leads all Confirm. */
+async function reportPriceDeal(members, price) {
+  const lead = members.find(m => m.is_lead) ?? members[0]
+  const nonLeads = members.filter(m => m !== lead)
+  await lead.page.waitForSelector('h1:has-text("Report outcome")', { timeout: 30_000 })
+  await lead.page.locator('input[type="number"]').fill(String(price))
+  await lead.page.click('button:has-text("Review & submit")')
+  await lead.page.waitForSelector('h1:has-text("Confirm outcome")', { timeout: 10_000 })
+  await lead.page.click('button:has-text("Yes, submit")')
+  // Confirm one at a time — submitConfirmation is a transaction on the shared group doc, and the
+  // Firestore emulator lock-times-out under concurrent transactions on one doc (same failure mode
+  // as role_counts). Sequential confirms keep it deterministic.
+  for (const m of nonLeads) {
+    await m.page.waitForSelector('h1:has-text("Confirm the outcome")', { timeout: 30_000 })
+    await m.page.click('button:has-text("Confirm")')
+  }
+}
+
+/** One reject cycle: lead reports a price, one non-lead REJECTS → group resets. */
+async function rejectCycle(members, price) {
+  const lead = members.find(m => m.is_lead) ?? members[0]
+  const rejecter = members.find(m => m !== lead)
+  await lead.page.waitForSelector('h1:has-text("Report outcome")', { timeout: 30_000 })
+  await lead.page.locator('input[type="number"]').fill(String(price))
+  await lead.page.click('button:has-text("Review & submit")')
+  await lead.page.waitForSelector('h1:has-text("Confirm outcome")', { timeout: 10_000 })
+  await lead.page.click('button:has-text("Yes, submit")')
+  await rejecter.page.waitForSelector('h1:has-text("Confirm the outcome")', { timeout: 30_000 })
+  await rejecter.page.click('button:has-text("Reject")')
+}
+
+// ── Local stack lifecycle (unconditional clean-start) ───────────────────────────
+
+const children = []
+function freePorts() {
+  for (const p of PORTS) {
+    // -sTCP:LISTEN so we kill only the SERVER on each port — not client sockets connected to it.
+    // (Plain `lsof -ti tcp:P` also lists this harness's own fetch connections to 5005/8082/…, so
+    // an unfiltered kill -9 would SIGKILL the harness itself during teardown → spurious exit 137.)
+    try { execSync(`lsof -ti tcp:${p} -sTCP:LISTEN | xargs kill -9`, { stdio: 'ignore' }) } catch { /* none */ }
+  }
+}
+// Readiness via HTTP against the SAME localhost URLs the harness/browser use — avoids
+// the IPv4(127.0.0.1)/IPv6(::1) loopback mismatch a raw TCP probe hits with Vite on macOS.
+async function waitHttp(url, label, maxMs = 90_000) {
+  const start = Date.now()
+  for (;;) {
+    try {
+      const res = await fetch(url, { method: 'GET' })
+      if (res.status > 0) return
+    } catch { /* not up yet */ }
+    if (Date.now() - start > maxMs) throw new Error(`${label} (${url}) never became ready`)
+    await sleep(700)
+  }
+}
+function spawnLogged(cmd, args, cwd, logFile) {
+  const out = openSync(logFile, 'a')
+  const child = spawn(cmd, args, { cwd, detached: true, stdio: ['ignore', out, out] })
+  children.push(child)
+  return child
+}
+
+async function startMockCallback() {
+  const received = []
+  const server = createServer((req, res) => {
+    let body = ''
+    req.on('data', c => (body += c))
+    req.on('end', () => {
+      try { received.push({ auth: req.headers.authorization, result: JSON.parse(body) }) }
+      catch { received.push({ auth: req.headers.authorization, result: body }) }
+      res.writeHead(200, { 'Content-Type': 'application/json' }); res.end('{"ok":true}')
+    })
+  })
+  await new Promise(r => server.listen(0, '127.0.0.1', r))
+  const port = server.address().port
+  return { port, received, close: () => new Promise(r => server.close(r)) }
+}
+
+async function bringUpStack(mockPort) {
+  banner('CLEAN-START — tear down + rebuild the local stack (unconditional)')
+  freePorts()
+  await sleep(1200)
+
+  // Wire the mock classroom callback into the emulator BEFORE it boots, so the real
+  // dashboard "Score & Record" push lands on our observer (functions/.env.local is
+  // gitignored + emulator-only; the prod callback URL in functions/.env is untouched).
+  const cb = `http://127.0.0.1:${mockPort}/receiveGameResult`
+  writeFileSync(path.join(ROOT, 'functions/.env.local'),
+    `CLASSROOM_CALLBACK_URL=${cb}\nCLASSROOM_ROSTER_URL=http://127.0.0.1:${mockPort}/getCourseRoster\n`)
+
+  // Frontend dev/emulator config (vite loads .env.local in all modes; .env.production is
+  // production-only). Real values are irrelevant — connectXxxEmulator overrides every
+  // connection — but projectId MUST match so the frontend writes to the same emulator
+  // namespace the harness reads. Mirrors Baxter's committed frontend/.env.local.
+  writeFileSync(path.join(ROOT, 'frontend/.env.local'),
+    [
+      'VITE_FIREBASE_API_KEY=dev-placeholder',
+      `VITE_FIREBASE_PROJECT_ID=${PROJECT}`,
+      `VITE_FIREBASE_AUTH_DOMAIN=${PROJECT}.firebaseapp.com`,
+      `VITE_FIREBASE_STORAGE_BUCKET=${PROJECT}.firebasestorage.app`,
+      'VITE_FIREBASE_MESSAGING_SENDER_ID=000000000000',
+      'VITE_FIREBASE_APP_ID=1:000000000000:web:000000000000000000000000',
+      `VITE_FIREBASE_DATABASE_URL=https://${PROJECT}-default-rtdb.firebaseio.com`,
+      '',
+    ].join('\n'))
+
+  console.log('▶ Building Cloud Functions…')
+  execSync('npm run build', { cwd: path.join(ROOT, 'functions'), stdio: 'inherit' })
+
+  console.log('▶ Starting emulators + Vite…')
+  const emuLog  = path.join(ROOT, 'playthrough-emu.log')
+  const viteLog = path.join(ROOT, 'playthrough-vite.log')
+  spawnLogged('firebase', ['emulators:start', '--only', 'auth,functions,firestore,database', '--project', PROJECT], ROOT, emuLog)
+  spawnLogged('npm', ['run', 'dev'], path.join(ROOT, 'frontend'), viteLog)
+
+  console.log('▶ Waiting for all emulators + Vite…')
+  // assignRole needs Firestore (role_counts tx) + Auth (createCustomToken); the functions
+  // /health endpoint answers before those are serving, so wait for EVERY emulator, not just
+  // functions, or the first assignRole cold-starts into an 'internal' error.
+  await waitHttp('http://localhost:9101/', 'auth emulator')
+  await waitHttp('http://localhost:8082/', 'firestore emulator')
+  await waitHttp('http://localhost:9002/.json', 'database emulator')
+  await waitHttp(`${FUNCTIONS}/health`, 'functions emulator')
+  await waitHttp(`${FE}/`, 'Vite dev server')
+  await sleep(6000)
+  console.log('  Stack ready ✅')
+}
+
+function tearDownStack() {
+  for (const c of children) { try { process.kill(-c.pid, 'SIGKILL') } catch { /* gone */ } }
+  freePorts()
+}
+
+// ── MAIN ────────────────────────────────────────────────────────────────────────
+
+async function main() {
+  const mock = await startMockCallback()
+  await bringUpStack(mock.port)
+
+  browser = await chromium.launch({ headless: !HEADED, slowMo: SLOWMO })
+
+  // Warm up the DEV stack before the real run: Vite transforms the whole module graph
+  // on-demand on first hit (React + firebase + game-ui — tens of seconds cold), and the
+  // functions emulator cold-starts on its first callable. Drive ONE throwaway student to
+  // "Your role" so that one-time cost is paid before the concurrent 8 launch (else their
+  // first waitForSelector races the cold transform).
+  banner('Warmup — priming Vite transform + spinning up function workers')
+  {
+    // Warm ONE page to pay the Vite first-transform + first assignRole cold-start (with retry).
+    const warmOne = async (tag) => {
+      const wctx = await browser.newContext()
+      const wpage = await wctx.newPage()
+      wpage.setDefaultTimeout(30_000)
+      let ok = false
+      for (let attempt = 1; attempt <= 8 && !ok; attempt++) {
+        // Fresh throwaway instance id per attempt so a partial assignRole never skews a reused
+        // instance's role_counts.
+        await wpage.goto(`${FE}/?_pid=warm-${tag}&_gid=warmup-${GID}-${tag}-${attempt}&_session=tab`)
+        ok = await wpage.waitForSelector('p:has-text("Your role")', { timeout: 20_000 }).then(() => true).catch(() => false)
+        if (!ok) { log('warmup', `${tag} cold-start attempt ${attempt} not ready — retrying`); await sleep(2000) }
+      }
+      await wctx.close()
+      return ok
+    }
+    if (!(await warmOne('a'))) throw new Error('warmup never reached "Your role" after retries')
+    // Then a small CONCURRENT burst so the emulator spins up several function workers before the
+    // real 8 launch (a single warm page only warms one worker; the 8 otherwise cold-start the rest).
+    await Promise.all(['b', 'c', 'd'].map(t => warmOne(t)))
+    log('warmup', 'stack warm ✅')
+  }
+
+  // ── (2,3,4) Launch all 8 students; each drives info → KC → prep → hold ──────
+  banner('Phase 1 — 8 students: info → KC stub → reflection → hold')
+  for (const pid of PIDS) {
+    const ctx  = await browser.newContext()
+    const page = await ctx.newPage()
+    page.setDefaultTimeout(60_000)
+    students.push({ page, pid })
+  }
+  // Step 1 — assign roles SEQUENTIALLY (one assignRole transaction at a time → no role_counts
+  // lock-timeout contention in the Firestore emulator). Fast: each is a single page load.
+  for (const s of students) await ensureOnRolePage(s.page, s.pid)
+  // Step 2 — drive the rest (info assert → KC → prep → hold) CONCURRENTLY: these write
+  // per-participant docs only, so there is no shared-doc transaction to contend on.
+  await Promise.all(students.map(async s => {
+    const r = await driveSetup(s.page, s.pid)
+    s.role = r.role
+  }))
+  const expertCount = students.filter(s => s.role === 'expert').length
+  const nonexpertCount = students.filter(s => s.role === 'nonexpert').length
+  assert(expertCount === 2 && nonexpertCount === 6,
+    `Roles assigned — 8 students → 2 expert + 6 nonexpert (got ${expertCount} + ${nonexpertCount})`)
+
+  // (4) The role sheet files must RESOLVE over the frontend origin (not 404 / SPA fallback).
+  for (const role of ['expert', 'nonexpert']) {
+    const r  = await fetch(`${FE}/role-info/${role}.pdf`)
+    const ct = r.headers.get('content-type') ?? ''
+    assert(r.status === 200 && !ct.includes('text/html'),
+      `Info doc — /role-info/${role}.pdf resolves as a real file [${r.status} ${ct}]`)
+  }
+  const bad   = await fetch(`${FE}/role-info/__nope__.pdf`)
+  const badCt = bad.headers.get('content-type') ?? ''
+  assert(!(bad.status === 200 && !badCt.includes('text/html')),
+    `Info doc — resolve check is real (bogus file does NOT resolve as a real file) [${bad.status} ${badCt}]`)
+
+  // ── (1) Instructor dashboard: loads + roster visible ───────────────────────
+  banner('Instructor — dashboard loads, roster visible, Generate Code, Match')
+  const dctx = await browser.newContext()
+  dash = await dctx.newPage()
+  dash.setDefaultTimeout(60_000)
+  await dash.goto(dashboardUrl())
+  await dash.waitForSelector('h1:has-text("Instructor Dashboard — eBay")', { timeout: 60_000 })
+  // Roster shows all 8 participants (their pids/names appear in the roster table).
+  const rosterReady = await dash.waitForSelector('table', { timeout: 30_000 }).then(() => true).catch(() => false)
+  let rosterNames = 0
+  for (const pid of PIDS) if (await dash.locator(`text=${pid}`).count() > 0) rosterNames++
+  assert(rosterReady && rosterNames === 8,
+    `Dashboard — roster visible with all 8 participants (found ${rosterNames}/8)`)
+
+  // ── Generate attendance code (dashboard UI), read the value, drive to waiting ──
+  await dash.click('button:has-text("Generate Code")')
+  let code = null
+  for (let i = 0; i < 20 && !code; i++) { code = await readAttendanceCode(); if (!code) await sleep(500) }
+  assert(!!code, `Attendance — "Generate Code" produced a code (${code})`)
+  await Promise.all(students.map(s => driveToWaiting(s, code)))
+
+  // ── (5) Match (dashboard UI) → two groups of { expert:1, nonexpert:3 } ─────
+  banner('Match — two groups of { expert:1, nonexpert:3 }')
+  await dash.waitForSelector('button:has-text("Match Now"):not([disabled])', { timeout: 30_000 })
+  await dash.click('button:has-text("Match Now")')
+  await pollGroups(gs => gs.length === 2, 30_000)
+  const groups0 = await readGroups()
+  assert(groups0.length === 2, `Matching — exactly 2 groups formed (got ${groups0.length})`)
+  const allWellFormed = groups0.every(g => g.expert.length === 1 && g.nonexpert.length === 3)
+  assert(allWellFormed,
+    `Matching — every group is { expert:1, nonexpert:3 } (${groups0.map(g => `${g.expert.length}+${g.nonexpert.length}`).join(', ')})`)
+
+  // Map browser students → their group (+ is_lead) from Firestore truth.
+  const parts = await readParticipants()
+  const byPid = Object.fromEntries(parts.map(p => [p.id, p]))
+  const membersOf = gid => students
+    .filter(s => byPid[s.pid]?.group_id === gid)
+    .map(s => ({ ...s, is_lead: byPid[s.pid].is_lead, role: byPid[s.pid].role }))
+  const gids = groups0.map(g => g.id).sort()
+  const happyGid    = gids[0]
+  const deadlockGid = gids[1]
+  const happyMembers    = membersOf(happyGid)
+  const deadlockMembers = membersOf(deadlockGid)
+
+  // ── (6) Happy group: a `price` deal, accepted + persisted ──────────────────
+  banner(`Outcome — happy group: price ${HAPPY_PRICE} deal`)
+  await startGroupToReport(happyMembers)
+  await reportPriceDeal(happyMembers, HAPPY_PRICE)
+  const gHappy = (await pollGroups(gs => gs.find(x => x.id === happyGid)?.status === 'completed', 30_000))
+    .find(x => x.id === happyGid)
+  assert(gHappy?.status === 'completed' && gHappy?.agreement === true && gHappy?.price === HAPPY_PRICE,
+    `Outcome — placeholder price deal accepted + persisted (status=${gHappy?.status}, price=${gHappy?.price})`)
+
+  // ── (7) Deadlock group: 5 rejects → deadlocked → dashboard override { price } ──
+  banner(`Deadlock — 5 rejects → deadlocked → dashboard override price ${DEADLOCK_PRICE}`)
+  await startGroupToReport(deadlockMembers)
+  for (let i = 1; i <= 5; i++) {
+    await rejectCycle(deadlockMembers, 100 + i)  // distinct price each cycle (immaterial; group never agrees)
+    log(deadlockGid, `reject cycle ${i}/5`)
+    if (i < 5) await pollGroups(gs => (gs.find(x => x.id === deadlockGid)?.status) === 'reporting', 15_000)
+  }
+  const gDead = (await pollGroups(gs => gs.find(x => x.id === deadlockGid)?.status === 'deadlocked', 30_000))
+    .find(x => x.id === deadlockGid)
+  assert(gDead?.status === 'deadlocked',
+    `Deadlock — 5 rejects drive the group to 'deadlocked' (status=${gDead?.status})`)
+  // Students see the instructor-intervention screen (real UI state).
+  const anyIntervention = await deadlockMembers[0].page.waitForSelector('h1:has-text("Instructor intervention needed")', { timeout: 15_000 })
+    .then(() => true).catch(() => false)
+  assert(anyIntervention, `Deadlock — the group's students see "Instructor intervention needed"`)
+
+  // Drive the REAL dashboard deadlock-override control: fill "Final price ($)" + Lock Deal.
+  await dash.reload()
+  await dash.waitForSelector('h2:has-text("Needs Resolution")', { timeout: 30_000 })
+  await dash.locator('input[type="number"]').first().fill(String(DEADLOCK_PRICE))
+  await dash.click('button:has-text("Lock Deal")')
+  const gResolved = (await pollGroups(gs => gs.find(x => x.id === deadlockGid)?.status === 'completed', 20_000))
+    .find(x => x.id === deadlockGid)
+  // If the control had submitted { placeholder } (the latent Hawks bug), submitInstructorOutcome
+  // would REJECT it against the schema → the group would NOT complete + no price would persist.
+  assert(gResolved?.status === 'completed' && gResolved?.price === DEADLOCK_PRICE,
+    `Deadlock override — control submits { price } (NOT { placeholder }): group completes with price=${gResolved?.price}`)
+
+  // ── (8) Score & Record (dashboard UI) → stub scoring → grade push (POST + 200) ──
+  banner('Finalize — Score & Record → stub scoring → grade push (POST + 200)')
+  await dash.click('button:has-text("Score & Record")')
+  // The push is async; wait for the mock to receive one GameResult per participant.
+  const isResult = r => r.result && typeof r.result === 'object' && typeof r.result.participant_id === 'string'
+  const start = Date.now()
+  while (mock.received.filter(isResult).length < 8 && Date.now() - start < 30_000) await sleep(500)
+  const pushed = mock.received.filter(isResult)
+  log('push', `mock received ${mock.received.length} request(s); ${pushed.length} are GameResult POSTs`)
+  assert(pushed.length >= 8,
+    `Grade push — the classroom callback received ${pushed.length} GameResult POSTs (one per participant; push fired)`)
+  assert(pushed.length > 0 && pushed.every(r => typeof r.result.normalized_score === 'number' || r.result.normalized_score === null),
+    `Grade push — every pushed GameResult carries a normalized_score field`)
+  assert(pushed.length > 0 && pushed.every(r => typeof r.auth === 'string' && r.auth.startsWith('Bearer ')),
+    `Grade push — every push is authenticated with the callback Bearer secret`)
+
+  // Stub scoring wrote raw_score = the group's price, for both roles.
+  const partsFinal = await readParticipants()
+  const happyRaws = partsFinal.filter(p => p.group_id === happyGid).map(p => p.raw_score)
+  const deadRaws  = partsFinal.filter(p => p.group_id === deadlockGid).map(p => p.raw_score)
+  assert(happyRaws.length === 4 && happyRaws.every(s => s === HAPPY_PRICE),
+    `Scoring — stub echoes price: happy group raw_score all === ${HAPPY_PRICE}`)
+  assert(deadRaws.length === 4 && deadRaws.every(s => s === DEADLOCK_PRICE),
+    `Scoring — stub echoes price: deadlock group raw_score all === ${DEADLOCK_PRICE}`)
+  assert(partsFinal.every(p => typeof p.normalized_score === 'number'),
+    `Scoring — every participant has a normalized (z) score`)
+}
+
+// ── Entry point ─────────────────────────────────────────────────────────────────
+
+;(async () => {
+  try {
+    await main()
+  } catch (err) {
+    FAIL++
+    console.error('\n✗ FATAL:', err?.message ?? err)
+    try { await dumpDiagnostics('fatal error') } catch { /* best effort */ }
+  } finally {
+    // Print the summary FIRST so it always lands in the log, even if teardown misbehaves.
+    banner(`RESULT — ${PASS}/${PASS + FAIL} green${FAIL ? `  (${FAIL} FAILED)` : ''}`)
+    await new Promise(res => setTimeout(res, 150))  // flush stdout to a redirected log
+    if (browser) { try { await browser.close() } catch { /* */ } }
+    tearDownStack()
+    process.exit(FAIL ? 1 : 0)
+  }
+})()
