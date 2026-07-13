@@ -28,9 +28,10 @@ import { ebayGameDef } from './gameDefinition'
 
 admin.initializeApp()
 
-// NOTE: validateKCGate is intentionally NOT called. eBay is single-role and has NO
-// KC role gate (removed with the single-role move — see gameDefinition prepDefaults).
-// The shared validator requires a gate per role, so invoking it would falsely fail.
+// NOTE: eBay now has a single-role KC gate ('kc_gate_bidder', grading 'assigned_role')
+// plus 5 graded statics (Slice 6, Option (b) — see gameDefinition prepDefaults). The
+// shared validateKCGate would PASS (exactly one gate covers the 'bidder' role), but we
+// still don't invoke it here — validation runs at config-save time in makeUpdateGameConfig.
 
 // ── Game endpoints (onCall, via game-server factories + eBay definition) ─
 

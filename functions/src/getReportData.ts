@@ -22,10 +22,12 @@ export type ReportRow = {
   /** Group doc id — the edit target for updateGroupContract (group_number is only a display index). */
   group_id: string | null
   role: string
-  // PLACEHOLDER outcome field (replaced by the live auction in Part 3).
+  // The auction clearing (sale) price for this member's group; null on a no-sale.
   price: number | null
   value_or_cost: number | null
   raw_score: number | null
+  /** Knowledge-check score (0.0–1.0 = correct statics / 5); null if KC not completed. */
+  knowledge_check_score: number | null
   text_answers: Record<string, string>
   /** Optional free-text Notes from the negotiated outcome ('' or null when blank/no deal). */
   notes: string | null
@@ -100,9 +102,10 @@ export const getReportData = onCall({ cors: ebayGameDef.corsOrigins }, async (re
         group_number: groupId ? (groupNumberMap.get(groupId) ?? null) : null,
         group_id: groupId ?? null,
         role,
-        price: outcome ? (outcome['price'] as number) : null,
+        price: outcome && outcome['price'] != null ? (outcome['price'] as number) : null,
         value_or_cost,
         raw_score: d['raw_score'] as number,
+        knowledge_check_score: (d['knowledge_check_score'] as number | null) ?? null,
         text_answers,
         notes: outcome ? ((outcome['notes'] as string | undefined) ?? null) : null,
       })

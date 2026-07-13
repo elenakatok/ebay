@@ -22,7 +22,10 @@
  * COVERAGE (student launch → grade push):
  *   1. Instructor: dashboard loads, roster visible (all 13 students).
  *   2. Every student launches as the single role `bidder` (no role branch).
- *   3. KC has NO role gate: the KnowledgeCheck UI auto-skips to the reflection.
+ *   3. REAL KC (Slice 6): a single-option role gate ("What is your role?" → Bidder,
+ *      always true → passes first click) + Gary's 5 graded MC. Options shuffle per
+ *      student (drive selects by label text). stu-1 gets 3/5 (score 0.6), stu-2 gets
+ *      0/5 (score 0 — a wrong answer never blocks), everyone else 5/5 (1.0).
  *   4. Info-document phase: the role sheet link is present AND resolves (shared eBay.pdf).
  *   5. Matching: 13 → [5,4,4] — R1 all placed, 4→5 flex, R2 exactly one expert
  *      (bidderIndex 1) per group, each student's payload carries their own endowment,
@@ -30,7 +33,11 @@
  *   6. Outcome: a `price` deal is accepted + persisted (schema-valid).
  *   7. Deadlock override: the dashboard control submits { price } (NOT { placeholder }) —
  *      locks in the Part-1 fix of the latent Hawks-scaffold bug.
- *   8. No-deal walk-away: present-but-no-bid students score raw 0 (present), NOT −2.
+ *   8. GRADING (Slice 6 — participation + KC only, PROFIT NEVER GRADED): every present
+ *      bidder gets the SAME flat raw (degenerate pool → z 0); the cursed winner (−$151)
+ *      and a losing bidder ($0) get the SAME participation score; silent bidders are
+ *      PRESENT (not −2); the true no-show is raw null / z −2, EXCLUDED; KC score (0–1)
+ *      rides as its own gradebook field; nobody is dropped from the push.
  *   9. LIVE AUCTION (Slice 4 — driven through the REAL student bidding UI): Start button
  *      opens the auction; the STORED duration override (60s) takes effect; every student
  *      reaches the bidding screen; the clock counts down; the private-info panel is
@@ -42,11 +49,9 @@
  *      max appears anywhere in RTDB; the startAuction guard blocks an un-endowed group;
  *      at the server deadline the clock stops and the bid control vanishes (no snipe).
  *      Every student bid is a real fill-field + click — NO submitBid callable is poked.
- *  10. Finalize: Score & Record → stub scoring runs → real grade push fires (POST + 200).
- *
- * REMOVED vs the 2-role baseline (obsolete under single role): the "2 expert + 6
- * nonexpert" role-count assertion, the KC role-gate assertion, and the KC graded-MC
- * "✓ Correct" assertion (there is no gate and no graded MC anymore).
+ *  10. Finalize: Score & Record → participation+KC scoring → real grade push (POST + 200).
+ *  11. Reports (Slice 6): the instructor Reports page loads for a RESOLVED auction, with
+ *      a real KC-score column and no negotiation-era crash.
  *
  * ── ONE-COMMAND RUN ──────────────────────────────────────────────────────────
  *   From the eBay repo root (where playwright resolves):
@@ -80,14 +85,47 @@ const PORTS = [9101, 5005, 8082, 9002, 5006, 4002, 5173]
 
 // A fresh instance id per run so re-runs never collide.
 const GID  = process.env.GID ?? `pt-${Date.now()}`
-// 13 students → single-role matching tiles to [5,4,4] (spec §2b): a flex group of 5
-// plus two of 4 — enough to exercise happy-deal + deadlock-override + no-deal (the
-// present-but-no-bid case) in one run, and to prove the 4→5 flex places everyone.
+// 13 students. ONE is the TRUE NO-SHOW (launches + completes KC, never attends class);
+// the other 12 attend → single-role matching tiles to [4,4,4] (spec §2b / planGroupSizes) —
+// three groups of 4: happy-deal + conformance-close + no-sale (present-but-no-bid), and
+// the held-back no-show proves the −2 floor. Every student is placed (no orphans).
 const PIDS = Array.from({ length: 13 }, (_, i) => `stu-${i + 1}`)
 
 // Placeholder prices: happy-path group vs deadlock-override group.
 const HAPPY_PRICE    = 500
 const DEADLOCK_PRICE = 777
+
+// ── Slice 6: the REAL KC (single-option gate + 5 graded statics) + the no-show ──
+const NOSHOW_PID  = PIDS[PIDS.length - 1]              // stu-13 — launches + KC, never attends
+const ATTEND_PIDS = PIDS.filter(p => p !== NOSHOW_PID) // the 12 who attend → [4,4,4]
+
+// The 5 graded statics, in stepper order (prepDefaults order 1..5). For each, a UNIQUE
+// substring of the CORRECT option label and of a WRONG option label — the drive selects
+// by TEXT so it is immune to the per-student option shuffle. (Verbatim from
+// eBay_KC_Questions_v1.md; Q3 uses the corrected 2×2 set, Q5 has 3 options.)
+const KC_FIELDS  = ['kc_private_vs_common', 'kc_information_structure', 'kc_second_price', 'kc_hard_close', 'kc_profit_definition']
+const KC_CORRECT = {
+  kc_private_vs_common:     'learn nothing about the value',
+  kc_information_structure: 'uncertain information about the non-expert',
+  kc_second_price:          'the highest bid. They pay the second highest bid',
+  kc_hard_close:            'At a pre-specified time',
+  kc_profit_definition:     'Neither of the above',
+}
+const KC_WRONG = {
+  kc_private_vs_common:     'attract more bidders',
+  kc_information_structure: 'You will be a seller',
+  kc_second_price:          'second highest bid. They pay their own bid',
+  kc_hard_close:            'no buyer wants to bid',
+  kc_profit_definition:     'Use value',
+}
+// Answer plan by pid: stu-1 → 3/5 (score 0.6); stu-2 → 0/5 (score 0); all others → 5/5 (1.0).
+const KC_THREE_PID = PIDS[0]   // stu-1
+const KC_ZERO_PID  = PIDS[1]   // stu-2
+function kcPlanFor(pid) {
+  if (pid === KC_THREE_PID) return new Set(['kc_private_vs_common', 'kc_information_structure', 'kc_second_price'])
+  if (pid === KC_ZERO_PID)  return new Set()
+  return new Set(KC_FIELDS)     // everyone else answers all 5 correctly
+}
 
 // ── Tiny test harness ──────────────────────────────────────────────────────────
 
@@ -332,6 +370,35 @@ async function ensureOnRolePage(page, pid) {
   if (!onRole) throw new Error(`${pid} never reached the role page`)
 }
 
+// Drive the REAL KC (Slice 6): the single-option role gate + 5 graded statics. Selects
+// options by UNIQUE label text (immune to the per-student option shuffle). Captures each
+// question's shuffled option order (for the shuffle assertion) and returns it.
+async function driveKnowledgeCheck(page, pid, correctSet) {
+  // ── Gate (Q0): one option "Bidder" — always the true role → passes on the first click ──
+  await page.waitForSelector('p:has-text("Knowledge check")', { timeout: 30_000 })
+  await page.locator('main label', { hasText: 'Bidder' }).first().click()
+  await page.locator('button:has-text("Submit")').click()
+
+  // ── 5 graded statics (stepper "Concept check — N of 5") ──
+  const orders = {}
+  let staticsSeen = 0
+  for (let i = 0; i < KC_FIELDS.length; i++) {
+    const field = KC_FIELDS[i]
+    // Regex (dash-agnostic) so the em-dash in "Concept check — N of 5" can't miss.
+    await page.locator('p', { hasText: new RegExp(`Concept check.*${i + 1} of 5`) }).first().waitFor({ timeout: 30_000 })
+    staticsSeen++
+    // This student's SHUFFLED option order (label text, DOM order) for the shuffle proof.
+    orders[field] = (await page.locator('main label').allInnerTexts()).map(t => t.replace(/\s+/g, ' ').trim())
+    const pick = correctSet.has(field) ? KC_CORRECT[field] : KC_WRONG[field]
+    await page.locator('main label', { hasText: pick }).first().click()
+    await page.locator('button:has-text("Submit")').click()
+    // Post-answer: ✓/✗ + explanation, then Continue (a wrong answer NEVER blocks progress).
+    await page.waitForSelector('button:has-text("Continue")', { timeout: 15_000 })
+    await page.locator('button:has-text("Continue")').click()
+  }
+  return { orders, staticsSeen, sawGate: true }
+}
+
 async function driveSetup(page, pid) {
   // SINGLE ROLE: everyone is a Bidder (the info page shows "Your role: Bidder").
   const roleLabel = ((await page.locator('h1').first().textContent()) ?? '').trim()
@@ -346,16 +413,20 @@ async function driveSetup(page, pid) {
 
   await page.click('button:has-text("Continue")')
 
-  // KC has NO role gate now (single-role move). The shared KnowledgeCheck UI, finding
-  // no gate question, auto-completes and advances straight to the reflection — there is
-  // no gate screen and no graded MC to drive. Reflection (ungraded free text) only.
+  // Slice 6: the REAL KC — single-option role gate ("What is your role?" → Bidder, always
+  // true → passes first click) then 5 graded MC. Options shuffle per student, so the drive
+  // picks by unique label text. stu-1 gets 3/5, stu-2 gets 0/5, everyone else 5/5.
+  const kc = await driveKnowledgeCheck(page, pid, kcPlanFor(pid))
+
+  // Reflection (ungraded, category 'preparation') — kept so the prep phase + Reports
+  // text tile still have content.
   await page.waitForSelector('p:has-text("Preparation — 1 of 1")', { timeout: 30_000 })
   await page.locator('textarea').fill(`Bidder plan: bid to my value, avoid the winner's curse.`)
   await page.click('button:has-text("Complete")')
 
   await page.waitForSelector('h1:has-text("Preparation complete")', { timeout: 30_000 })
   log(pid, '◆ hold screen')
-  return { page, pid, role: 'bidder' }
+  return { page, pid, role: 'bidder', kc }
 }
 
 // ── Phase 1b: hold → confirmation → attendance code → waiting room ──────────────
@@ -612,10 +683,23 @@ async function main() {
   await Promise.all(students.map(async s => {
     const r = await driveSetup(s.page, s.pid)
     s.role = r.role
+    s.kc   = r.kc
   }))
   const bidderCount = students.filter(s => s.role === 'bidder').length
   assert(bidderCount === PIDS.length,
     `Roles assigned — all ${PIDS.length} students launch as the single role \`bidder\` (got ${bidderCount})`)
+
+  // ── Slice 6 KC: gate seen + passed, all 5 graded rendered, options shuffle per student ──
+  assert(students.every(s => s.kc?.sawGate),
+    `KC — every student saw the role gate ("What is your role in this auction?") and passed on the first click`)
+  assert(students.every(s => s.kc?.staticsSeen === 5),
+    `KC — all 5 graded questions rendered + submitted for every student (got [${[...new Set(students.map(s => s.kc?.staticsSeen))].join(',')}])`)
+  // Option order shuffles per student (seed = djb2(participantId + ':' + field)): two
+  // different students differ on ≥1 of the 5 questions' option orders.
+  const kcFlat = s => KC_FIELDS.map(f => (s.kc?.orders?.[f] ?? []).join('|')).join(' || ')
+  const sA = students.find(s => s.pid === 'stu-3'), sB = students.find(s => s.pid === 'stu-4')
+  assert(sA && sB && kcFlat(sA) !== kcFlat(sB),
+    `KC — options shuffle per student: stu-3 and stu-4 see a different option order on ≥1 of the 5 questions`)
 
   // (4) The ONE shared case PDF must RESOLVE over the frontend origin (not 404 / SPA fallback).
   const pdf = await fetch(`${FE}/role-info/eBay.pdf`)
@@ -653,21 +737,24 @@ async function main() {
   let code = null
   for (let i = 0; i < 20 && !code; i++) { code = await readAttendanceCode(); if (!code) await sleep(500) }
   assert(!!code, `Attendance — "Generate Code" produced a code (${code})`)
-  await Promise.all(students.map(s => driveToWaiting(s, code)))
+  // The TRUE NO-SHOW (stu-13) completed KC but does NOT attend — held back here.
+  const attendees = students.filter(s => s.pid !== NOSHOW_PID)
+  await Promise.all(attendees.map(s => driveToWaiting(s, code)))
+  log(NOSHOW_PID, '⊘ TRUE NO-SHOW — completed KC, will NOT attend class')
 
-  // ── (5) Match (dashboard UI) → single-role tiling: 13 → [5,4,4] (spec §2b) ──
-  banner('Match — single-role tiling: 13 students → [5,4,4] (4→5 flex, all placed)')
+  // ── (5) Match (dashboard UI) → single-role tiling: 12 attendees → [4,4,4] (spec §2b) ──
+  banner('Match — single-role tiling: 12 attendees → [4,4,4] (1 true no-show held back)')
   await dash.waitForSelector('button:has-text("Match Now"):not([disabled])', { timeout: 30_000 })
   await dash.click('button:has-text("Match Now")')
   await pollGroups(gs => gs.length === 3, 30_000)
   const groups0 = await readGroups()
   assert(groups0.length === 3, `Matching — exactly 3 groups formed (got ${groups0.length})`)
   const sizes = groups0.map(g => g.bidders.length).sort((a, b) => a - b)
-  assert(JSON.stringify(sizes) === JSON.stringify([4, 4, 5]),
-    `Matching — sizes tile to [4,4,5] (4→5 flex) (got [${sizes.join(',')}])`)
+  assert(JSON.stringify(sizes) === JSON.stringify([4, 4, 4]),
+    `Matching — sizes tile to [4,4,4] (12 attendees) (got [${sizes.join(',')}])`)
   const totalPlaced = groups0.reduce((n, g) => n + g.bidders.length, 0)
-  assert(totalPlaced === PIDS.length,
-    `Matching (R1) — every student placed, no orphans (${totalPlaced}/${PIDS.length})`)
+  assert(totalPlaced === ATTEND_PIDS.length,
+    `Matching (R1) — every ATTENDEE placed, no orphans (${totalPlaced}/${ATTEND_PIDS.length})`)
   // vCommon must NOT be on any client-readable group doc.
   assert(groups0.every(g => !g.vCommonOnGroup),
     `Endowment — vCommon is absent from every client-readable group doc (server-only truth)`)
@@ -677,11 +764,15 @@ async function main() {
   const parts = await pollParticipants(
     ps => {
       const matched = ps.filter(p => p.group_id)
-      return matched.length === PIDS.length && matched.every(p => p.hasEndowment)
+      return matched.length === ATTEND_PIDS.length && matched.every(p => p.hasEndowment)
     },
     30_000,
   )
   const byPid = Object.fromEntries(parts.map(p => [p.id, p]))
+
+  // The true no-show launched + has a role, but was never matched (never attended).
+  assert(byPid[NOSHOW_PID] && byPid[NOSHOW_PID].role === 'bidder' && !byPid[NOSHOW_PID].group_id,
+    `Matching — the true no-show ${NOSHOW_PID} has a role but NO group (held out of the match)`)
   const membersOf = gid => students
     .filter(s => byPid[s.pid]?.group_id === gid)
     .map(s => ({ ...s, is_lead: byPid[s.pid].is_lead, role: byPid[s.pid].role }))
@@ -983,11 +1074,11 @@ async function main() {
   assert(detailStored && detailStored.winner === 4 && detailStored.clearing === 3001 && dReveal === '2650',
     `DETAIL — resolved on the clock: winner ${detailStored?.winner}, clearing ${detailStored?.clearing} (concurrency maxes), reveal ${dReveal} (expect 4 / 3001 / 2650)`)
 
-  // ── (8) Score & Record (dashboard UI) → scoring over AUCTION outcomes → grade push ──
-  // Grading is UNCHANGED (Slice 6 wires the real participation/KC grade): the stub still
-  // echoes group.outcome.price, which the auction resolution now supplies (clearing price;
-  // no-sale → walk-away). The finalize/push wiring is what this proves.
-  banner('Finalize — Score & Record → scoring over auction outcomes → grade push (POST + 200)')
+  // ══════════════════ SLICE 6 — PARTICIPATION + KC GRADING → GRADEBOOK PUSH ══════════════════
+  // Grading is PARTICIPATION + KC only (spec §7). PROFIT IS NEVER GRADED: every present
+  // bidder gets the SAME flat raw_score → degenerate single-role pool → normalized 0. The
+  // true no-show → raw null / z −2. KC score (0–1) rides as its own gradebook field.
+  banner('Finalize — Score & Record → participation+KC grading → grade push (POST + 200)')
   await dash.click('button:has-text("Score & Record")')
   const isResult = r => r.result && typeof r.result === 'object' && typeof r.result.participant_id === 'string'
   const start = Date.now()
@@ -1001,25 +1092,94 @@ async function main() {
   assert(pushed.length > 0 && pushed.every(r => typeof r.auth === 'string' && r.auth.startsWith('Bearer ')),
     `Grade push — every push is authenticated with the callback Bearer secret`)
 
-  // The auction resolution supplied group.outcome: clearing price (winner group) / no-deal
-  // (no-sale group). The stub echoes it as raw_score, giving the z-score pool real variance.
-  const partsFinal = await readParticipants()
-  const confRaws   = partsFinal.filter(p => p.group_id === confGid).map(p => p.raw_score)
-  const detailRaws = partsFinal.filter(p => p.group_id === happyGid).map(p => p.raw_score)
-  const nsParts    = partsFinal.filter(p => p.group_id === nsGid)
-  assert(confRaws.length === confMembers.length && confRaws.every(s => s === 2901),
-    `Scoring — conformance group raw_score all === 2901 (auction clearing price echoed) [${confRaws.join(',')}]`)
-  assert(detailRaws.length === happyMembers.length && detailRaws.every(s => s === 3001),
-    `Scoring — detail group raw_score all === 3001 (auction clearing price echoed) [${detailRaws.join(',')}]`)
-  assert(partsFinal.every(p => typeof p.normalized_score === 'number'),
-    `Scoring — every participant has a normalized (z) score`)
+  const pushedById  = Object.fromEntries(pushed.map(r => [r.result.participant_id, r.result]))
+  const pushedPids  = new Set(pushed.map(r => r.result.participant_id))
 
-  // GRADING TRAP: no-sale students attended + reached the auction but placed NO bid —
-  // they are PRESENT (walk-away raw 0), NEVER the no-show −2.
-  assert(nsParts.length === nsMembers.length && nsParts.every(p => p.raw_score === 0),
-    `Scoring — no-bid present students score raw 0 (walk-away), not treated as absent [${nsParts.map(p => p.raw_score).join(',')}]`)
-  assert(nsParts.every(p => typeof p.normalized_score === 'number' && p.normalized_score !== -2),
-    `Scoring — no-bid present students get a present z-score, NOT the no-show −2 [${nsParts.map(p => p.normalized_score).join(',')}]`)
+  // NOBODY DROPPED — every one of the 13 (winners, losers, silent bidders, the no-show).
+  assert(PIDS.every(p => pushedPids.has(p)) && pushedPids.size === PIDS.length,
+    `Grade push — EVERY participant lands in the payload, nobody dropped: ${pushedPids.size}/${PIDS.length} (incl. the no-show)`)
+
+  // knowledge_check_score rides as its OWN 0–1 field — a REAL varying number now.
+  assert(pushed.every(r => r.result.knowledge_check_score === null ||
+      (typeof r.result.knowledge_check_score === 'number' && r.result.knowledge_check_score >= 0 && r.result.knowledge_check_score <= 1)),
+    `Grade push — knowledge_check_score rides as its own 0–1 field on every record`)
+  assert(pushedById[KC_THREE_PID]?.knowledge_check_score === 0.6 && pushedById[KC_ZERO_PID]?.knowledge_check_score === 0,
+    `Grade push — the real KC values reach the gradebook (3/5 → 0.6, 0/5 → 0) [got ${pushedById[KC_THREE_PID]?.knowledge_check_score} / ${pushedById[KC_ZERO_PID]?.knowledge_check_score}]`)
+
+  // PROFIT IS NOT IN THE PAYLOAD in ANY form — not scored, not metadata.
+  const profitLeak = pushed.find(r => {
+    const res = r.result
+    if ('profit' in res || 'auction_result' in res || 'raw_score' in res) return true
+    return Object.keys(res.details ?? {}).length !== 0
+  })
+  assert(!profitLeak,
+    `Grade push — PROFIT is NOT in the payload (no profit/auction_result/raw_score field; details empty) — profit never graded`)
+
+  // ── Participation: every PRESENT student has the IDENTICAL flat raw_score → z 0 ──
+  const partsFinal  = await readParticipants()
+  const byPidFinal  = Object.fromEntries(partsFinal.map(p => [p.id, p]))
+  const present     = partsFinal.filter(p => p.group_id)          // the 12 matched
+  const nsParts     = partsFinal.filter(p => p.group_id === nsGid)
+  const noShow      = byPidFinal[NOSHOW_PID]
+
+  const rawSet = new Set(present.map(p => p.raw_score))
+  assert(present.length === ATTEND_PIDS.length && rawSet.size === 1 && [...rawSet][0] === 1,
+    `Scoring — every present student has the IDENTICAL flat participation raw_score (=1), profit-independent [${[...rawSet].join(',')}]`)
+  assert(present.every(p => p.normalized_score === 0),
+    `Scoring — degenerate single-role pool: every present student normalizes to 0 (SD=0 guard) [${[...new Set(present.map(p => p.normalized_score))].join(',')}]`)
+
+  // ── THE key assertion: PROFIT has ZERO effect on the participation grade ──
+  // In the conformance group C4 WON at a LOSS (game-profit −$151) while C1–C3 lost
+  // (game-profit $0). Their participation raw + normalized are IDENTICAL.
+  const winRes       = await readStoredResult(C4.pid)
+  const winnerProfit = winRes?.perBidder.find(b => b.bidderIndex === 4)?.profit
+  const loserProfit  = winRes?.perBidder.find(b => b.bidderIndex === 1)?.profit
+  const wF = byPidFinal[C4.pid], lF = byPidFinal[C1.pid]
+  assert(winnerProfit === -151 && loserProfit === 0 &&
+         wF && lF && wF.raw_score === lF.raw_score && wF.normalized_score === lF.normalized_score,
+    `Scoring — PROFIT NOT GRADED: the CURSED winner (profit ${winnerProfit}) and a LOSING bidder (profit ${loserProfit}) get the SAME participation raw (${wF?.raw_score}=${lF?.raw_score}) + normalized (${wF?.normalized_score}=${lF?.normalized_score})`)
+
+  // ── GRADING TRAP: silent bidders (attended, reached the auction, NEVER bid) are PRESENT ──
+  assert(nsParts.length === nsMembers.length && nsParts.every(p => p.raw_score === 1),
+    `Scoring TRAP — silent bidders (present, no bid) score the participation point (raw 1), NOT the no-show −2 [${nsParts.map(p => p.raw_score).join(',')}]`)
+  assert(nsParts.every(p => p.normalized_score === 0),
+    `Scoring TRAP — silent bidders get a PRESENT z-score (0), never −2 [${nsParts.map(p => p.normalized_score).join(',')}]`)
+
+  // ── The TRUE no-show: never attended → raw null, z −2, EXCLUDED from the pool ──
+  assert(noShow && noShow.raw_score == null && noShow.normalized_score === -2,
+    `Scoring — the TRUE no-show ${NOSHOW_PID} (never attended): raw_score null, normalized_score −2, EXCLUDED [raw=${noShow?.raw_score}, z=${noShow?.normalized_score}]`)
+  assert(pushedById[NOSHOW_PID]?.normalized_score === -2 && pushedById[NOSHOW_PID]?.status === 'no_show',
+    `Grade push — the true no-show is delivered with normalized_score −2 / status no_show`)
+
+  // ── KC scores land per spec (denominator 5): 3/5 → 0.6, 0/5 → 0, all-correct → 1.0 ──
+  const kcOf = pid => byPidFinal[pid]?.knowledge_check_score
+  assert(kcOf(KC_THREE_PID) === 0.6,
+    `KC score — the 3-of-5 student ${KC_THREE_PID} finalizes with knowledge_check_score 0.6 (got ${kcOf(KC_THREE_PID)})`)
+  assert(kcOf(KC_ZERO_PID) === 0,
+    `KC score — the all-wrong student ${KC_ZERO_PID} STILL finalizes, score 0 (a wrong answer never blocks progress) (got ${kcOf(KC_ZERO_PID)})`)
+  assert(kcOf('stu-3') === 1,
+    `KC score — an all-correct student (stu-3) finalizes with score 1.0 (got ${kcOf('stu-3')})`)
+  assert(kcOf(NOSHOW_PID) === 1,
+    `KC score — the no-show completed KC before leaving: score 1.0 still rides to the gradebook (got ${kcOf(NOSHOW_PID)})`)
+
+  // ── (9) REPORTS page — renders for a RESOLVED auction (never exercised before) ──
+  banner('Reports — instructor Reports page loads for a resolved auction (KC column, no negotiation-era crash)')
+  await dash.goto(`${FE}/reports?_dev_game_instance_id=${encodeURIComponent(GID)}&_session=tab`)
+  await dash.waitForSelector('h2:has-text("Reports — eBay")', { timeout: 30_000 })
+  // Wait for getReportData to load — the tile enables + shows "N participants finalized"
+  // (until then the tile card is disabled and clicking it is a no-op).
+  await dash.waitForSelector('text=participants finalized', { timeout: 20_000 })
+  // Open the "Contract Outcomes" tile (a clickable card div, not a button).
+  await dash.getByText('Contract Outcomes — per participant', { exact: true }).first().click()
+  await dash.waitForSelector('table', { timeout: 15_000 })
+  const reportBody = await dash.locator('body').innerText()
+  const kcTexts    = await dash.locator('[data-testid="report-kc"]').allInnerTexts()
+  assert(/KC score/.test(reportBody) && kcTexts.length === ATTEND_PIDS.length,
+    `Reports — the page renders a per-participant table with a KC-score column for all ${ATTEND_PIDS.length} present students (got ${kcTexts.length})`)
+  assert(kcTexts.some(t => t.includes('3 / 5')) && kcTexts.some(t => t.includes('0 / 5')) && kcTexts.some(t => t.includes('5 / 5')),
+    `Reports — the KC column shows the real varying scores (3/5, 0/5, 5/5) [${[...new Set(kcTexts)].join(', ')}]`)
+  assert(!/NaN|undefined|Bidder null/.test(reportBody),
+    `Reports — no NaN / undefined / negotiation-era leftovers for a resolved auction`)
 }
 
 // ── Entry point ─────────────────────────────────────────────────────────────────

@@ -24,10 +24,11 @@ type ReportRow = {
   group_number: number | null
   group_id: string | null
   role: string
-  // PLACEHOLDER outcome field (replaced by the live auction in Part 3).
+  // The auction clearing (sale) price for this member's group; null on a no-sale.
   price: number | null
   value_or_cost: number | null
   raw_score: number | null
+  knowledge_check_score: number | null
   text_answers: Record<string, string>
   notes: string | null
 }
@@ -51,7 +52,12 @@ function fmtSigned(n: number | null): string {
 
 // ── Sortable columns ──────────────────────────────────────────────────────────
 
-type SortKey = 'name' | 'group' | 'role' | 'price' | 'value_or_cost' | 'raw_score' | 'notes' | 'edit'
+type SortKey = 'name' | 'group' | 'role' | 'price' | 'value_or_cost' | 'raw_score' | 'kc' | 'notes' | 'edit'
+
+// KC score is stored 0.0–1.0 over 5 graded statics; show it as "N / 5".
+function fmtKc(n: number | null): string {
+  return n == null ? '—' : `${Math.round(n * 5)} / 5`
+}
 
 const COLUMNS: readonly SortableColumn<ReportRow, SortKey>[] = [
   {
@@ -86,6 +92,12 @@ const COLUMNS: readonly SortableColumn<ReportRow, SortKey>[] = [
     tiebreak: (a, b) => a.display_name.localeCompare(b.display_name),
     render: r => <span style={{ fontVariantNumeric: 'tabular-nums' }}>{fmtSigned(r.raw_score)}</span>,
     compare: (a, b) => (a.raw_score ?? 0) - (b.raw_score ?? 0),
+  },
+  {
+    key: 'kc', label: 'KC score', nullsLast: true, isNull: r => r.knowledge_check_score === null,
+    tiebreak: (a, b) => a.display_name.localeCompare(b.display_name),
+    render: r => <span data-testid="report-kc" style={{ fontVariantNumeric: 'tabular-nums' }}>{fmtKc(r.knowledge_check_score)}</span>,
+    compare: (a, b) => (a.knowledge_check_score ?? 0) - (b.knowledge_check_score ?? 0),
   },
   {
     key: 'notes', label: 'Notes', headerStyle: { minWidth: 80 },

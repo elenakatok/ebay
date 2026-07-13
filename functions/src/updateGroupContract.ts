@@ -118,9 +118,10 @@ export const updateGroupContract = onCall({ cors: ebayGameDef.corsOrigins }, asy
         group_number,
         group_id: groupId,
         role,
-        price: outcome ? (outcome['price'] as number) : null,
+        price: outcome && outcome['price'] != null ? (outcome['price'] as number) : null,
         value_or_cost,
         raw_score,
+        knowledge_check_score: (d['knowledge_check_score'] as number | null) ?? null,
         text_answers,
         notes: outcome ? ((outcome['notes'] as string | undefined) ?? null) : null,
       })
