@@ -14,6 +14,18 @@
         ".write": false
       }
     },
+    "auctions": {
+      "$instanceId": {
+        "$groupId": {
+          ".read": "auth != null && root.child('auctionMembers').child($instanceId).child(auth.uid).val() === $groupId",
+          ".write": false
+        }
+      }
+    },
+    "auctionMembers": {
+      ".read": false,
+      ".write": false
+    },
     ".read": false,
     ".write": false
   }

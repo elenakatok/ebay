@@ -63,6 +63,9 @@ export { scoreAndRecord } from './scoreAndRecord'
 // ── Part 3 Slice 0: endowment assignment at match time (Firestore onCreate trigger) ──
 export { assignEndowments } from './assignEndowments'
 
+// ── Part 3 Slice 3: live auction server (RTDB state + bid callable) ──
+export { startAuction, submitBid, closeAuction } from './liveAuction'
+
 // ── Non-game onRequest endpoints ──────────────────────────────────────────────
 
 const CORS_ORIGINS = new Set(['https://ebay.mygames.live'])

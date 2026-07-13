@@ -31,7 +31,12 @@
  *   7. Deadlock override: the dashboard control submits { price } (NOT { placeholder }) —
  *      locks in the Part-1 fix of the latent Hawks-scaffold bug.
  *   8. No-deal walk-away: present-but-no-bid students score raw 0 (present), NOT −2.
- *   9. Finalize: Score & Record → stub scoring runs → real grade push fires (POST + 200).
+ *   9. LIVE AUCTION (Slice 3): Start button opens the auction; the STORED duration
+ *      override (60s, not 600) takes effect; the startAuction guard blocks an
+ *      un-endowed group; 4 simultaneous bids settle to the exact proxy price with no
+ *      lost updates; no confidential max appears anywhere in RTDB; a post-deadline
+ *      bid is rejected (server clock is the only truth) and closes the auction.
+ *  10. Finalize: Score & Record → stub scoring runs → real grade push fires (POST + 200).
  *
  * REMOVED vs the 2-role baseline (obsolete under single role): the "2 expert + 6
  * nonexpert" role-count assertion, the KC role-gate assertion, and the KC graded-MC
@@ -59,6 +64,8 @@ const ROOT      = path.dirname(fileURLToPath(import.meta.url))
 const FE        = process.env.FE_BASE ?? 'http://localhost:5173'
 const FUNCTIONS = process.env.FN_BASE ?? `http://localhost:5005/${PROJECT}/us-central1`
 const FIRESTORE = process.env.FS_BASE ?? `http://localhost:8082/v1/projects/${PROJECT}/databases/(default)/documents`
+const DATABASE  = process.env.DB_BASE ?? 'http://localhost:9002'
+const DB_NS     = `${PROJECT}-default-rtdb`
 const HEADED    = process.env.HEADED === '1'
 const SLOWMO    = process.env.SLOWMO ? Number(process.env.SLOWMO) : 0
 
@@ -204,6 +211,52 @@ async function readAttendanceCode() {
   return doc?.fields?.code?.stringValue ?? null
 }
 
+// ── RTDB emulator REST + callable helpers (Slice 3 live auction) ─────────────────
+// Bearer owner bypasses RTDB rules so the harness can read the server-only truth.
+async function rtdbGet(rpath) {
+  const res = await fetch(`${DATABASE}/${rpath}.json?ns=${DB_NS}`, { headers: { Authorization: 'Bearer owner' } })
+  if (!res.ok) return null
+  return res.json()
+}
+const readAuction = gid => rtdbGet(`auctions/${GID}/${gid}`)
+async function pollAuction(gid, pred, maxMs = 15_000) {
+  const start = Date.now()
+  let a = await readAuction(gid)
+  while (Date.now() - start < maxMs) {
+    a = await readAuction(gid)
+    if (pred(a)) return a
+    await sleep(500)
+  }
+  return a
+}
+// Direct callable POST to the functions emulator. Returns {ok,status,result,error}.
+async function callFn(name, data) {
+  const res = await fetch(`${FUNCTIONS}/${name}`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ data }),
+  })
+  const body = await res.json().catch(() => ({}))
+  return { ok: res.ok, status: res.status, result: body.result, error: body.error }
+}
+const startAuctionFn = gid => callFn('startAuction', { _dev: { game_instance_id: GID }, group_id: gid })
+const submitBidFn = (pid, gid, maxAmount, extra = {}) =>
+  callFn('submitBid', { _test: { participant_id: pid, game_instance_id: GID }, group_id: gid, max_amount: maxAmount, ...extra })
+
+// Firestore REST: set/clear a participant's raw auction_endowment field (owner bypass).
+async function patchEndowment(pid, rawValueOrNull) {
+  const body = { fields: { auction_endowment: rawValueOrNull ?? { nullValue: null } } }
+  const res = await fetch(`${FIRESTORE}/game_instances/${GID}/participants/${pid}?updateMask.fieldPaths=auction_endowment`, {
+    method: 'PATCH', headers: { Authorization: 'Bearer owner', 'content-type': 'application/json' }, body: JSON.stringify(body),
+  })
+  return res.ok
+}
+// Recursively collect every numeric leaf under an RTDB subtree (for the no-max walk).
+function numericLeaves(node, out = []) {
+  if (node == null) return out
+  if (typeof node === 'number') { out.push(node); return out }
+  if (typeof node === 'object') for (const v of Object.values(node)) numericLeaves(v, out)
+  return out
+}
+
 // ── Student / dashboard URLs (DEV bypasses) ─────────────────────────────────────
 
 const studentUrl   = pid => `${FE}/?_pid=${pid}&_gid=${GID}&_session=tab`
@@ -265,6 +318,29 @@ async function driveToWaiting(s, code) {
   await page.click('button[type="submit"]')
   await page.waitForSelector('h1:has-text("Waiting to be matched")', { timeout: 30_000 })
   log(pid, '★ waiting room')
+}
+
+// ── Instructor Settings: save the live-auction duration + increment (REAL page) ──
+// Exercises the STORED-override path (Part-2 handoff flagged it as never covered):
+// the instructor changes duration in Settings, and startAuction must pick it up.
+async function saveAuctionSettings(page, durationSeconds, increment = 1) {
+  await page.goto(`${FE}/settings?_dev_game_instance_id=${encodeURIComponent(GID)}&_session=tab`)
+  await page.waitForSelector('button:has-text("Auction")', { timeout: 30_000 })
+  const durInput = page.locator('#cfg-duration_seconds')
+  if (!(await durInput.isVisible().catch(() => false))) {
+    await page.locator('button', { hasText: 'Auction' }).first().click()
+  }
+  await durInput.waitFor({ state: 'visible', timeout: 10_000 })
+  // Inputs are disabled until the session is ready + config loaded.
+  await page.waitForFunction(() => {
+    const el = document.querySelector('#cfg-duration_seconds')
+    return el && !el.disabled
+  }, { timeout: 20_000 })
+  await durInput.fill(String(durationSeconds))
+  await page.locator('#cfg-bid_increment').fill(String(increment))   // section save validates BOTH fields
+  const body = durInput.locator('xpath=ancestor::div[3]')
+  await body.getByRole('button', { name: 'Save', exact: true }).click()
+  await page.waitForSelector('span:has-text("Saved ")', { timeout: 15_000 }).catch(() => {})
 }
 
 // ── Group reveal → off-platform → (report form ready) ───────────────────────────
@@ -578,6 +654,71 @@ async function main() {
   const happyMembers    = membersOf(happyGid)
   const deadlockMembers = membersOf(deadlockGid)
   const noDealMembers   = membersOf(noDealGid)
+  const bidderIndexOf   = pid => byPid[pid]?.bidderIndex
+
+  // ══════════════════ SLICE 3 — LIVE AUCTION (server side) ══════════════════
+  banner('Live auction — Start button + STORED duration override (60s, not 600)')
+
+  // Config-override: instructor saves duration_seconds=60 in Settings, THEN starts
+  // the happy group's auction via the REAL dashboard button.
+  await saveAuctionSettings(dash, 60, 1)
+  await dash.goto(dashboardUrl())
+  await dash.waitForSelector('h1:has-text("Instructor Dashboard — eBay")', { timeout: 30_000 })
+  await dash.waitForSelector(`[data-testid="start-auction-${happyGid}"]`, { timeout: 30_000 })
+  await dash.locator(`[data-testid="start-auction-${happyGid}"]`).click()
+  const aHappy = await pollAuction(happyGid, a => a?.status === 'open', 15_000)
+  assert(aHappy?.status === 'open', `Auction — Start button opens the auction (status=${aHappy?.status})`)
+  const span = aHappy ? (aHappy.endsAtMs - aHappy.startedAtMs) : 0
+  assert(Math.abs(span - 60_000) <= 3_000,
+    `Auction — endsAtMs reflects the STORED duration override 60s, not 600 (span=${span}ms)`)
+
+  // Guard: an auction cannot start while any member is un-endowed. Deterministic —
+  // null one member's endowment, assert the start is rejected, then restore it verbatim.
+  banner('Live auction — startAuction guard (no start before endowments land)')
+  const guardPid = noDealMembers[0].pid
+  const guardRaw = (await fsGetDoc(`participants/${guardPid}`))?.fields?.auction_endowment ?? null
+  await patchEndowment(guardPid, null)
+  const guardRes = await startAuctionFn(noDealGid)
+  assert(!guardRes.ok, `Auction guard — startAuction REJECTED while a member lacks an endowment (status=${guardRes.status})`)
+  assert((await readAuction(noDealGid)) == null, `Auction guard — no auction node created for the un-ready group`)
+  await patchEndowment(guardPid, guardRaw)   // restore verbatim
+
+  // Concurrency: 4 simultaneous bids must settle to the EXACT sequential-proxy result.
+  banner('Live auction — 4 simultaneous bids → exact proxy price, no lost updates')
+  const cMembers = happyMembers.slice(0, 4)
+  const CMAXES = [1000, 2000, 3000, 5000]      // well-separated → no derived value equals a max
+  const winnerPid = cMembers[3].pid            // the top max (5000)
+  await Promise.all(cMembers.map((m, i) => submitBidFn(m.pid, happyGid, CMAXES[i])))
+  const aConc = await pollAuction(happyGid, a => a?.currentAmount === 3001, 15_000)
+  assert(aConc?.currentAmount === 3001,
+    `Auction concurrency — 4 simultaneous bids settle at the exact proxy price 3001 (got ${aConc?.currentAmount})`)
+  assert(aConc?.highBidderIndex === bidderIndexOf(winnerPid),
+    `Auction concurrency — high bidder is the top-max bidder, no lost update (got ${aConc?.highBidderIndex}, expect ${bidderIndexOf(winnerPid)})`)
+
+  // No confidential max anywhere in the RTDB subtree.
+  const leaked = numericLeaves(await readAuction(happyGid)).filter(v => new Set(CMAXES).has(v))
+  assert(leaked.length === 0,
+    `Auction — NO confidential max appears anywhere under auctions/${happyGid} (leaked: [${leaked.join(',')}])`)
+
+  // Close via the real button.
+  await dash.locator(`[data-testid="close-auction-${happyGid}"]`).click()
+  const aClosed = await pollAuction(happyGid, a => a?.status === 'closed', 10_000)
+  assert(aClosed?.status === 'closed', `Auction — Close button closes the auction (status=${aClosed?.status})`)
+
+  // Sniping: the SERVER clock owns the deadline. A bid after endsAtMs is rejected even
+  // with the client clock faked backward in the payload (the callable reads no client time).
+  banner('Live auction — SNIPING: late bid rejected, server clock is the only truth')
+  await saveAuctionSettings(dash, 2, 1)                       // 2-second auctions from here
+  await dash.goto(dashboardUrl())                             // restore the dashboard page off /settings
+  const snipeStart = await startAuctionFn(deadlockGid)
+  assert(snipeStart.ok, `Auction sniping — short auction started (endsAtMs ${snipeStart.result?.endsAtMs})`)
+  await sleep(2600)                                            // let the SERVER clock pass endsAtMs
+  const fakeEarly = Date.now() - 10_000_000                    // "it's still early!" — a faked client clock
+  const snipeRes = await submitBidFn(deadlockMembers[0].pid, deadlockGid, 2500, { client_now_ms: fakeEarly })
+  assert(!snipeRes.ok,
+    `Auction SNIPING — a bid after the server deadline is REJECTED; faked client clock ignored (status=${snipeRes.status})`)
+  assert((await readAuction(deadlockGid))?.status === 'closed',
+    `Auction sniping — the late bid implicitly CLOSED the auction`)
 
   // ── (6) Happy group: a `price` deal, accepted + persisted ──────────────────
   banner(`Outcome — happy group: price ${HAPPY_PRICE} deal`)

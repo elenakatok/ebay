@@ -98,6 +98,10 @@ export const ebayGameDef: GameDefinition = {
   configFields: [
     { key: 'bidder_role_name',         kind: 'string',      default: 'Bidder' },
     { key: 'bidder_reservation_price', kind: 'positiveInt', default: 0 },
+    // Live-auction knobs (AuctionSettings.durationSeconds / increment) — instructor
+    // editable, read by startAuction at start time. Falls back to compiled defaults.
+    { key: 'duration_seconds',         kind: 'positiveInt', default: 600 },
+    { key: 'bid_increment',            kind: 'positiveInt', default: 1 },
     // ONE shared case/instructions PDF (the case text covers the whole auction).
     // Per-participant private numbers are NOT in the PDF — they come from the
     // endowment shown in-game at match time (Part 3).

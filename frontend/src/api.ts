@@ -63,6 +63,22 @@ export const submitLeadOutcome = (args: CallArgs, outcome: OutcomeFields | null)
 export const submitConfirmation = (args: CallArgs, confirmed: boolean) =>
   callFn<{ ok: boolean; outcome: string }>('submitConfirmation', { ...args, confirmed })
 
+// ── Live auction (Slice 3) ──────────────────────────────────────────────────────
+
+/** Instructor: start the live auction for a group (reads duration/increment from config). */
+export const startAuction = (groupId: string) =>
+  callFn<{ ok: boolean; endsAtMs?: number; startedAtMs?: number; durationSeconds?: number; increment?: number; alreadyStarted?: boolean }>(
+    'startAuction', { group_id: groupId })
+
+/** Instructor: close the live auction for a group. */
+export const closeAuction = (groupId: string) =>
+  callFn<{ ok: boolean }>('closeAuction', { group_id: groupId })
+
+/** Student: submit a confidential proxy max. (Slice 4 wires the real bidding UI to this.) */
+export const submitBid = (args: CallArgs, groupId: string, maxAmount: number) =>
+  callFn<{ ok: boolean; currentAmount: number; highBidderIndex: number | null }>(
+    'submitBid', { ...args, group_id: groupId, max_amount: maxAmount })
+
 // ── Instructor API ────────────────────────────────────────────────────────────
 
 export type InstructorSessionArgs =

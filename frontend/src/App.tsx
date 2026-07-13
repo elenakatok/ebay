@@ -16,6 +16,20 @@ const ebayInfoLinks = [
   ]},
 ]
 
+// Live-auction settings (Slice 3): instructor-editable duration + increment, read by
+// startAuction at start time. Rendered as a custom Settings section (the built-in
+// sections only cover role names / reservation prices / info links).
+const ebayConfigSections = [
+  {
+    id: 'auction',
+    title: 'Auction',
+    fields: [
+      { key: 'duration_seconds', label: 'Auction duration (seconds)', kind: 'positiveInt' as const, placeholder: '600' },
+      { key: 'bid_increment',    label: 'Bid increment',              kind: 'positiveInt' as const, placeholder: '1' },
+    ],
+  },
+]
+
 export default function App() {
   return (
     <BrowserRouter>
@@ -31,6 +45,7 @@ export default function App() {
             auth={auth}
             roleLabels={ebayRoleLabels}
             roleInfoLinks={ebayInfoLinks}
+            configSections={ebayConfigSections}
           />
         } />
       </Routes>

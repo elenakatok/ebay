@@ -1,12 +1,70 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { httpsCallable } from 'firebase/functions'
 import { InstructorDashboard as SharedDashboard, type DeadlockResolutionProps, type OutcomeFields } from '@mygames/game-ui'
 import { auth, functions, rtdb } from '../firebase'
 import { ebayConfig } from '../gameConfig'
+import { startAuction, closeAuction, getRoster } from '../api'
 
 const roleLabels = Object.fromEntries(
   ebayConfig.roles.map(r => [r.key, r.label])
 )
+
+// ── Minimal live-auction controls (Slice 3) ──────────────────────────────────
+// Per-group Start / Close Auction buttons, rendered BELOW the shared dashboard
+// (the shared round-controls slot only renders for multi-round games; eBay is
+// single-round). Self-fetches the groups via getRoster once the instructor session
+// is established. Bare minimum to drive the auction — the student bidding UI + live
+// board arrive in Slice 4.
+
+function EbayAuctionControls() {
+  const [groups, setGroups] = useState<{ group_id: string }[]>([])
+  const [busy, setBusy] = useState<Record<string, boolean>>({})
+  const [msg, setMsg] = useState<Record<string, string>>({})
+
+  // Poll the roster until the session is ready and groups exist (they appear at match).
+  useEffect(() => {
+    let alive = true
+    const tick = () =>
+      getRoster()
+        .then(r => { if (alive && r.groups) setGroups(r.groups.map(g => ({ group_id: g.group_id }))) })
+        .catch(() => { /* session not ready yet — retry on the interval */ })
+    tick()
+    const id = setInterval(tick, 2500)
+    return () => { alive = false; clearInterval(id) }
+  }, [])
+
+  const run = (gid: string, fn: () => Promise<{ ok: boolean; endsAtMs?: number; alreadyStarted?: boolean }>, verb: string) => {
+    setBusy(b => ({ ...b, [gid]: true }))
+    setMsg(m => ({ ...m, [gid]: '' }))
+    fn()
+      .then(r => setMsg(m => ({ ...m, [gid]: r.alreadyStarted ? 'already open' : `${verb} ✓` })))
+      .catch((e: unknown) => setMsg(m => ({ ...m, [gid]: e instanceof Error ? e.message : 'error' })))
+      .finally(() => setBusy(b => ({ ...b, [gid]: false })))
+  }
+
+  if (groups.length === 0) return null
+  return (
+    <div data-testid="auction-controls" style={{ maxWidth: 900, margin: '1rem auto', padding: '0.75rem 1rem', border: '1px solid #d0d7de', borderRadius: 6 }}>
+      <div style={{ fontWeight: 600, marginBottom: '0.5rem' }}>Live auction</div>
+      {groups.map((g, i) => (
+        <div key={g.group_id} data-testid={`auction-row-${g.group_id}`} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.2rem 0' }}>
+          <span style={{ minWidth: 72 }}>Group {i + 1}</span>
+          <button
+            data-testid={`start-auction-${g.group_id}`}
+            disabled={busy[g.group_id]}
+            onClick={() => run(g.group_id, () => startAuction(g.group_id), 'started')}
+          >Start Auction</button>
+          <button
+            data-testid={`close-auction-${g.group_id}`}
+            disabled={busy[g.group_id]}
+            onClick={() => run(g.group_id, () => closeAuction(g.group_id), 'closed')}
+          >Close Auction</button>
+          {msg[g.group_id] && <span style={{ fontSize: '0.85rem', color: '#555' }}>{msg[g.group_id]}</span>}
+        </div>
+      ))}
+    </div>
+  )
+}
 
 // ── Deadlock resolution control (PLACEHOLDER — real deal fields in Part 3) ────
 // Submits the single placeholder 'price' field from ebaySchema (validated
@@ -69,6 +127,7 @@ async function submitInstructorOutcome(groupId: string, outcome: OutcomeFields):
 
 export default function InstructorDashboard() {
   return (
+    <>
     <SharedDashboard
       title="Instructor Dashboard — eBay"
       roleLabels={roleLabels}
@@ -83,5 +142,7 @@ export default function InstructorDashboard() {
       reportsRoute="/reports"
       scoreAndRecord={{ callableName: 'scoreAndRecord', label: 'Score & Record' }}
     />
+    <EbayAuctionControls />
+    </>
   )
 }

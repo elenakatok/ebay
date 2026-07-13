@@ -51,6 +51,13 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    // Per-bidder CONFIDENTIAL proxy maxes (Slice 3). The whole game depends on the
+    // max never leaking: nobody — no student, no client read — ever sees it. Same
+    // server-only construction as truth/. All writes are server-side (admin SDK).
+    match /game_instances/{instanceId}/groups/{groupId}/bids/{doc} {
+      allow read, write: if false;
+    }
+
     // Default deny for everything else.
     match /{document=**} {
       allow read, write: if false;
