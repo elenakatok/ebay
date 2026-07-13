@@ -7,16 +7,12 @@ import Reports from './pages/Reports'
 import { SettingsPage } from '@mygames/game-ui'
 
 const ebayRoleLabels: Record<string, string> = {
-  expert:    'Expert',
-  nonexpert: 'Non-Expert',
+  bidder: 'Bidder',
 }
 
 const ebayInfoLinks = [
-  { roleKey: 'expert', links: [
-    { key: 'expert_sheet_url', label: 'Role sheet' },
-  ]},
-  { roleKey: 'nonexpert', links: [
-    { key: 'nonexpert_sheet_url', label: 'Role sheet' },
+  { roleKey: 'bidder', links: [
+    { key: 'bidder_sheet_url', label: 'Role sheet' },
   ]},
 ]
 

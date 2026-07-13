@@ -46,19 +46,19 @@ beforeAll(async () => {
     // The group doc (client-readable) — deliberately does NOT carry vCommon.
     await db.doc(`game_instances/${INSTANCE}/groups/${GROUP}`).set({
       group_id: GROUP,
-      expert_participants: [STUDENT],
-      nonexpert_participants: [OTHER],
+      bidder_participants: [STUDENT, OTHER],
     })
     // The server-only truth doc — carries vCommon.
     await db.doc(`game_instances/${INSTANCE}/groups/${GROUP}/truth/auction`).set({
       group_id: GROUP,
       vCommon: 2650,
     })
-    // The student's own participant doc, stamped with their endowment.
+    // The student's own participant doc, stamped with their endowment (the
+    // bidderIndex-1 draw = the expert: signalHalfWidth 0, signal === vCommon).
     await db.doc(`game_instances/${INSTANCE}/participants/${STUDENT}`).set({
       participant_id: STUDENT,
-      role: 'expert',
-      auction_endowment: { bidderIndex: 1, signal: 2650, privateValue: 0, sigma: 0 },
+      role: 'bidder',
+      auction_endowment: { bidderIndex: 1, signal: 2650, privateValue: 0, signalHalfWidth: 0 },
     })
   })
 })

@@ -24,8 +24,8 @@ export const seedMatchTest = onRequest(async (req, res) => {
     return
   }
 
-  // eBay: 2 roles, composition { expert:1, nonexpert:3 }
-  type SeedP = { id: string; role: 'expert' | 'nonexpert' }
+  // eBay: single role `bidder`, composition { bidder:4 }
+  type SeedP = { id: string; role: 'bidder' }
   const gameInstanceId = body.game_instance_id
   const participants = body.participants as SeedP[]
 
@@ -68,7 +68,7 @@ export const seedMatchTest = onRequest(async (req, res) => {
 })
 
 // Emulator-only: seed a matched group directly (bypass triggerMatching) for outcome tests.
-// eBay group composition: 1 expert + 3 nonexpert = 4 participants (may flex to 5).
+// eBay group composition: single role `bidder`, 4–7 participants per group.
 export const seedGroupForTest = onRequest(async (req, res) => {
   if (process.env.FUNCTIONS_EMULATOR !== 'true') {
     res.status(404).json({ error: 'Not found' })
@@ -83,8 +83,7 @@ export const seedGroupForTest = onRequest(async (req, res) => {
     game_instance_id?: unknown
     group_id?: unknown
     lead_id?: unknown
-    expert_participants?: unknown
-    nonexpert_participants?: unknown
+    bidder_participants?: unknown
   }
 
   if (typeof body.game_instance_id !== 'string' || !body.game_instance_id) {
@@ -96,18 +95,14 @@ export const seedGroupForTest = onRequest(async (req, res) => {
   if (typeof body.lead_id !== 'string' || !body.lead_id) {
     res.status(400).json({ error: 'lead_id required' }); return
   }
-  if (
-    !Array.isArray(body.expert_participants) ||
-    !Array.isArray(body.nonexpert_participants)
-  ) {
-    res.status(400).json({ error: 'expert_participants and nonexpert_participants arrays required' }); return
+  if (!Array.isArray(body.bidder_participants)) {
+    res.status(400).json({ error: 'bidder_participants array required' }); return
   }
 
   const gameInstanceId = body.game_instance_id
   const groupId = body.group_id
   const leadId = body.lead_id
-  const expertPids = body.expert_participants as string[]
-  const nonexpertPids = body.nonexpert_participants as string[]
+  const bidderPids = body.bidder_participants as string[]
 
   const db = admin.firestore()
   const instanceRef = db.collection('game_instances').doc(gameInstanceId)
@@ -125,13 +120,12 @@ export const seedGroupForTest = onRequest(async (req, res) => {
     await clearBatch.commit()
   }
 
-  // Write group doc with both role arrays.
+  // Write group doc with the single-role participant array.
   const groupRef = instanceRef.collection('groups').doc(groupId)
   await groupRef.set({
     group_id: groupId,
     game_instance_id: gameInstanceId,
-    expert_participants: expertPids,
-    nonexpert_participants: nonexpertPids,
+    bidder_participants: bidderPids,
     lead_participant_id: leadId,
     outcome: null,
     status: 'matched',
@@ -140,21 +134,11 @@ export const seedGroupForTest = onRequest(async (req, res) => {
 
   // Write participant docs.
   const batch = db.batch()
-  for (const pid of expertPids) {
+  for (const pid of bidderPids) {
     batch.set(instanceRef.collection('participants').doc(pid), {
       participant_id: pid,
       game_instance_id: gameInstanceId,
-      role: 'expert',
-      group_id: groupId,
-      is_lead: pid === leadId,
-      attendance_confirmed_at: now,
-    })
-  }
-  for (const pid of nonexpertPids) {
-    batch.set(instanceRef.collection('participants').doc(pid), {
-      participant_id: pid,
-      game_instance_id: gameInstanceId,
-      role: 'nonexpert',
+      role: 'bidder',
       group_id: groupId,
       is_lead: pid === leadId,
       attendance_confirmed_at: now,

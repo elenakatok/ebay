@@ -34,11 +34,10 @@ type ReportRow = {
 
 type QuestionMeta = { field: string; prompt: string; role_target: string }
 
-// ── Role labels — 2 roles ─────────────────────────────────────────────────────
+// ── Role labels — single role ─────────────────────────────────────────────────
 
 const ROLE_LABELS: Record<string, string> = {
-  expert:    'Expert',
-  nonexpert: 'Non-Expert',
+  bidder: 'Bidder',
 }
 
 function fmt(n: number | null): string {

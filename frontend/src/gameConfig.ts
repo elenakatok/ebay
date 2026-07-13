@@ -3,13 +3,13 @@ import { type OutcomeField, type OutcomeSchema } from '@mygames/game-engine/outc
 
 export type { RoleConfig, OutcomeField, OutcomeSchema }
 
-// PART 1 SKELETON — mirrors functions/src/gameDefinition.ts. The outcome schema
+// SINGLE-ROLE — mirrors functions/src/gameDefinition.ts. One role `bidder`;
+// expertise is an endowment assigned at match, not an identity. The outcome schema
 // is a PLACEHOLDER (single dummy field); the live auction replaces it in Part 3.
 
 export const ebayConfig: RoleConfig = {
   roles: [
-    { key: 'expert',    label: 'Expert',     short: 'E' },
-    { key: 'nonexpert', label: 'Non-Expert', short: 'N' },
+    { key: 'bidder', label: 'Bidder', short: 'B' },
   ],
 }
 

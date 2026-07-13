@@ -26,7 +26,11 @@ export interface AuctionEndowment {
   bidderIndex: number
   signal: number            // the bidder's BELIEF — NEVER used in resolution
   privateValue: number
-  sigma: number             // metadata for a future random-draw engine; unused here
+  // The true common value lies within [signal − signalHalfWidth, signal + signalHalfWidth].
+  // Bidder 1 has halfWidth 0 → their signal IS the truth. That is what makes them the
+  // expert. Metadata for a future random-draw engine (uniform over that interval);
+  // recorded here, NEVER consumed in resolution.
+  signalHalfWidth: number
 }
 
 export interface AuctionResolution {

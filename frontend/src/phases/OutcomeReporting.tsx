@@ -22,9 +22,8 @@ type GroupData = {
   lead_outcome: OutcomeFields | null
   lead_reported_at: object | null
   confirmations: Record<string, Confirmation>
-  // 2-role participant arrays — matching ebayGameDef composition {expert:1, nonexpert:3}
-  expert_participants: string[]
-  nonexpert_participants: string[]
+  // Single-role participant array — matches ebayGameDef composition {bidder:4}
+  bidder_participants: string[]
   lead_participant_id: string
   reset_count: number | undefined
   agreement_reached: boolean | null
@@ -39,13 +38,11 @@ type Props = {
   onComplete: () => void
 }
 
-// ── Role determination — iterate both participant arrays ─────────────────────
+// ── Role determination — single role `bidder` ────────────────────────────────
+// Everyone is a bidder (expertise is a hidden endowment, not a role/label here).
 
-function deriveRoleKey(groupData: GroupData, participantId: string): string {
-  if (groupData.expert_participants.includes(participantId)) return 'expert'
-  if (groupData.nonexpert_participants.includes(participantId)) return 'nonexpert'
-  // Fallback: unknown role — should not happen in a correctly seeded group
-  return 'nonexpert'
+function deriveRoleKey(_groupData: GroupData, _participantId: string): string {
+  return 'bidder'
 }
 
 // ── Schema-driven form helpers ─────────────────────────────────────────────────
@@ -320,7 +317,7 @@ export default function OutcomeReporting({
   const { status, lead_outcome, lead_reported_at, confirmations } = groupData
   const resetCount = groupData.reset_count ?? 0
 
-  // ── Derive role from all 3 participant arrays — no 2-way ternary ──────────
+  // ── Single role: everyone is a Bidder ─────────────────────────────────────
   const roleKey   = deriveRoleKey(groupData, participantId)
   const roleLabel = labelFor(ebayConfig, roleKey)
 

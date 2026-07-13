@@ -72,8 +72,8 @@ export default function InstructorDashboard() {
     <SharedDashboard
       title="Instructor Dashboard — eBay"
       roleLabels={roleLabels}
-      // CRITICAL: pass composition so canMatch gates on ≥1 expert + ≥3 nonexpert
-      composition={{ expert: 1, nonexpert: 3 }}
+      // CRITICAL: pass composition so canMatch gates on ≥4 bidders (single role)
+      composition={{ bidder: 4 }}
       DeadlockResolutionControl={EbayDeadlockControl}
       submitInstructorOutcome={submitInstructorOutcome}
       functions={functions}

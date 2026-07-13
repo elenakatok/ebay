@@ -18,7 +18,6 @@ import {
   makePushResultsToClassroom,
   makeGetGameConfig,
   makeUpdateGameConfig,
-  validateKCGate,
   makeGetStudentPrepQuestions,
   makeGetDebriefQuestions,
   makeSubmitKnowledgeCheck,
@@ -29,12 +28,9 @@ import { ebayGameDef } from './gameDefinition'
 
 admin.initializeApp()
 
-// ── KC gate validation (runs at cold start — loud failure if gate is misconfigured) ──
-const _kcGateError = validateKCGate(
-  ebayGameDef.roles.roles.map(r => r.key),
-  ebayGameDef.prepDefaults ?? [],
-)
-if (_kcGateError) throw new Error(`eBay KC gate validation failed: ${_kcGateError}`)
+// NOTE: validateKCGate is intentionally NOT called. eBay is single-role and has NO
+// KC role gate (removed with the single-role move — see gameDefinition prepDefaults).
+// The shared validator requires a gate per role, so invoking it would falsely fail.
 
 // ── Game endpoints (onCall, via game-server factories + eBay definition) ─
 

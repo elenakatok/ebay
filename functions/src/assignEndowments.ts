@@ -1,13 +1,17 @@
 // ═══════════════════════════════════════════════════════════════════════════════
-// eBay Part 3 — Slice 0: per-participant endowment assignment AT MATCH TIME.
+// eBay Part 3 — endowment assignment AT MATCH TIME (single-role redesign).
 //
 // The match/group-creation path is the SHARED makeTriggerMatching (game-server),
 // which eBay must not modify. The eBay-local hook into "match time" is therefore a
 // Firestore onCreate trigger on the group doc: when triggerMatching writes a group,
 // this fires and stamps each participant's endowment + records the group's truth.
 //
-// bidderIndex assignment: the single expert ALWAYS gets bidderIndex 1; non-experts
-// fill slots 2..N in match order (their order in the group's role array).
+// SINGLE ROLE: everyone is a `bidder`. Expertise is an information endowment, not an
+// identity — whoever draws bidderIndex 1 IS the expert (their endowment has
+// signalHalfWidth 0, signal === vCommon). Group membership is already randomized by
+// the shared matcher's shuffle, so the first bidder in the array (→ bidderIndex 1)
+// is an effectively random expert. Exactly one expert per group, GUARANTEED BY
+// CONSTRUCTION. Bidders fill slots 1..N in match order.
 //
 // ── vCommon MUST NEVER REACH A CLIENT ──────────────────────────────────────────
 // The group doc is client-readable (firestore.rules), so vCommon CANNOT live on it.
@@ -24,15 +28,11 @@ import { ebayConfig } from './gameDefinition'
 import {
   EBAY_V_COMMON,
   EBAY_MAX_BIDDER_INDEX,
-  ebayEndowmentFor,
+  assignBidderEndowments,
 } from './ebayAuction'
 
-// Role keys in a fixed order: expert first (→ bidderIndex 1), then non-experts.
-const EXPERT_ROLE = 'expert'
-const ORDERED_ROLES = [
-  EXPERT_ROLE,
-  ...ebayConfig.roles.map(r => r.key).filter(k => k !== EXPERT_ROLE),
-]
+// Every role key (single-role game → just `bidder`), in declared order.
+const ROLE_KEYS = ebayConfig.roles.map(r => r.key)
 
 /** Server-only doc holding the group's truth (deny-all in firestore.rules). */
 const TRUTH_DOC = 'auction'
@@ -45,9 +45,10 @@ export const assignEndowments = onDocumentCreated(
     const group = snap.data()
     const { instanceId, groupId } = event.params
 
-    // Build the bidder ordering: expert(s) first, then non-experts in match order.
+    // Collect group members in match order (their order in the role array). The
+    // first member draws bidderIndex 1 → the expert.
     const orderedPids: string[] = []
-    for (const roleKey of ORDERED_ROLES) {
+    for (const roleKey of ROLE_KEYS) {
       const pids = (group[fieldFor(roleKey, 'participants')] as string[] | undefined) ?? []
       orderedPids.push(...pids)
     }
@@ -56,7 +57,7 @@ export const assignEndowments = onDocumentCreated(
       return
     }
     if (orderedPids.length > EBAY_MAX_BIDDER_INDEX) {
-      // Groups are 4 or 5 (spec §10). Larger is a matching bug — log loudly, assign
+      // Groups are 4–7 (spec §2b). Larger is a matching bug — log loudly, assign
       // the slots we can rather than throwing and leaving the group half-stamped.
       console.error(
         `[assignEndowments] group ${groupId} has ${orderedPids.length} participants; ` +
@@ -68,13 +69,12 @@ export const assignEndowments = onDocumentCreated(
     const instanceRef = db.collection('game_instances').doc(instanceId)
     const batch = db.batch()
 
-    orderedPids.forEach((pid, i) => {
-      const bidderIndex = i + 1
-      if (bidderIndex > EBAY_MAX_BIDDER_INDEX) return // skip un-endowable overflow slots
-      batch.update(instanceRef.collection('participants').doc(pid), {
-        auction_endowment: ebayEndowmentFor(bidderIndex),
+    // Pure assignment (bidderIndex 1..N; first member = expert). Overflow dropped.
+    for (const { participantId, endowment } of assignBidderEndowments(orderedPids)) {
+      batch.update(instanceRef.collection('participants').doc(participantId), {
+        auction_endowment: endowment,
       })
-    })
+    }
 
     // Truth: vCommon in a server-only subcollection the client cannot read.
     batch.set(

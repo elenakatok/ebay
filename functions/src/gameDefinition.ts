@@ -2,20 +2,23 @@ import type { Outcome, OutcomeSchema, RoleConfig } from '@mygames/game-engine'
 import type { GameDefinition } from '@mygames/game-server'
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// eBay — PART 1 SKELETON (blank canvas).
+// eBay — SINGLE-ROLE game (Part 3, Slice 2 redesign).
 //
-// This file carries eBay's REAL identity (game_id, 2 roles, composition) but a
-// PLACEHOLDER outcome form + STUB scoring + STUB KC. The entire outcome/scoring
-// layer is REPLACED by the live real-time auction in Part 3 — do not invest here.
-// Real role-targeted KC + role PDFs arrive in Part 2 (Gary's content).
+// There is ONE role: `bidder`. Expertise is NOT an identity — it is an information
+// endowment assigned at MATCH time (assignEndowments trigger): whoever draws
+// bidderIndex 1 IS the expert. Students launch, do prep, and attend as generic
+// bidders and do not learn they are the expert until the auction begins.
+//
+// PLACEHOLDER outcome form + STUB scoring remain (replaced by the live auction in
+// later Part 3 slices). KC is reflection-only for now — the graded role-gate KC was
+// removed with the single-role move (Gary's real graded content is still pending).
 // ═══════════════════════════════════════════════════════════════════════════════
 
-// ── Role config (2 roles — real) ──────────────────────────────────────────────
+// ── Role config (ONE role — `bidder`) ─────────────────────────────────────────
 
 export const ebayConfig: RoleConfig = {
   roles: [
-    { key: 'expert',    label: 'Expert',     short: 'E' },
-    { key: 'nonexpert', label: 'Non-Expert', short: 'N' },
+    { key: 'bidder', label: 'Bidder', short: 'B' },
   ],
 }
 
@@ -26,11 +29,10 @@ export const ebaySchema: OutcomeSchema = [
   { key: 'notes', type: 'text' },  // optional free-text; blank = '', excluded from scoring
 ]
 
-// ── Score sense (both value-sense — real scoring in Part 3) ───────────────────
+// ── Score sense (value-sense — real scoring in Part 3) ────────────────────────
 
 export const ebayScoreSense: Record<string, 'value' | 'cost'> = {
-  expert:    'value',
-  nonexpert: 'value',
+  bidder: 'value',
 }
 
 // ── Scoring (STUB — placeholder; real value model in Part 3) ──────────────────
@@ -55,7 +57,7 @@ export function computeScoreBreakdown(
 
   const price = Number(outcome['price'] ?? 0)
 
-  if (roleKey === 'expert' || roleKey === 'nonexpert') {
+  if (roleKey === 'bidder') {
     return { value_or_cost: round3(price), raw_score: round3(price) }
   }
   return { value_or_cost: 0, raw_score: 0 }
@@ -75,108 +77,48 @@ export const ebayGameDef: GameDefinition = {
   game_id: 'ebay',
   roles:   ebayConfig,
   scoreSense: ebayScoreSense,
-  composition: { expert: 1, nonexpert: 3 },
+  composition: { bidder: 4 },
   outcomeSchema: ebaySchema,
   computeRawScore,
   computeScoreBreakdown,
   // reservations: PLACEHOLDER — real values in Part 3
-  reservations: { expert: 0, nonexpert: 0 },
+  reservations: { bidder: 0 },
   corsOrigins: ['https://ebay.mygames.live'],
   classroom: { callbackSecretId: 'ebay_v1' },
 
-  // perRoleCap = 4 → base group is {expert:1, nonexpert:3} (4 players); surplus
-  // nonexperts fill to 4 per group, so a group can flex 4→5. This is the standard
-  // shared matching path — the full 4↔5 remainder/flex rule and the small-class
-  // (6/7/11) matching fallback are an OPEN item (spec §10), deliberately NOT built
-  // in Part 1. TODO-Part-3: Elena to confirm the flex + small-class fallback.
-  perRoleCap: 4,
+  // Single-role sizing (spec §2b): base group is {bidder:4}; perRoleCap 7 lets one
+  // group absorb the remainder up to size 7, so the shared matcher realizes the
+  // 4/5-else-oversize tiling for every turnout ≥ 4 (see auction/grouping.ts
+  // planGroupSizes — 6→[6], 7→[7], 11→[6,5], 9→[5,4], never <4 unless turnout <4,
+  // never >7). The endowment table defines exactly 7 bidder slots (ebayAuction.ts).
+  perRoleCap: 7,
   // deadlockThreshold omitted → 5
 
-  // Settings page config fields (PLACEHOLDER — minimal; real sheet URLs in Part 2/3)
+  // Settings page config fields (ONE role — `bidder`; real sheet URLs in Part 2/3).
   configFields: [
-    { key: 'expert_role_name',            kind: 'string',      default: 'Expert' },
-    { key: 'nonexpert_role_name',         kind: 'string',      default: 'Non-Expert' },
-    { key: 'expert_reservation_price',    kind: 'positiveInt', default: 0 },
-    { key: 'nonexpert_reservation_price', kind: 'positiveInt', default: 0 },
-    // Part 2: ONE shared case/instructions PDF for BOTH roles (the case text covers the
-    // expert and non-expert situations). Per-participant private numbers are NOT in the PDF —
-    // they come from the endowment shown in-game (Part 3).
-    { key: 'expert_sheet_url',            kind: 'url',         default: '/role-info/eBay.pdf' },
-    { key: 'nonexpert_sheet_url',         kind: 'url',         default: '/role-info/eBay.pdf' },
+    { key: 'bidder_role_name',         kind: 'string',      default: 'Bidder' },
+    { key: 'bidder_reservation_price', kind: 'positiveInt', default: 0 },
+    // ONE shared case/instructions PDF (the case text covers the whole auction).
+    // Per-participant private numbers are NOT in the PDF — they come from the
+    // endowment shown in-game at match time (Part 3).
+    { key: 'bidder_sheet_url',         kind: 'url',         default: '/role-info/eBay.pdf' },
   ],
 
   // Info page links — keys must appear in configFields above
   roleInfoLinks: [
-    { roleKey: 'expert',    links: [{ key: 'expert_sheet_url',    label: 'Role sheet' }] },
-    { roleKey: 'nonexpert', links: [{ key: 'nonexpert_sheet_url', label: 'Role sheet' }] },
+    { roleKey: 'bidder', links: [{ key: 'bidder_sheet_url', label: 'Role sheet' }] },
   ],
 
-  // ── prepDefaults: STUB KC (real role-targeted questions from Gary in Part 2) ──
-  // Per role: Q1 role gate (system, assigned_role, ungraded) + 1 graded static MC
-  // (denominator 1, role-filtered) + 1 ungraded free-response reflection.
+  // ── prepDefaults: reflection only ─────────────────────────────────────────────
+  // The single-role move removed the KC role gate. The shared KC flow is
+  // gate-driven (the KnowledgeCheck UI skips KC entirely with no gate, and the
+  // graded-static submit requires the gate), so removing the gate also removes the
+  // graded MC — KC is reflection-only until Gary's real graded content lands.
+  // One ungraded free-response reflection for the `bidder` role remains.
   prepDefaults: [
-    // ══ ROLE: expert ═════════════════════════════════════════════════════════
     {
-      field: 'kc_gate_expert', type: 'mc', system: true,
-      category: 'knowledge_check', format: 'multiple_choice',
-      grading: 'assigned_role', role_target: 'expert',
-      prompt: 'What is your role in this auction?',
-      placeholder: '', order: 0, hidden: false, deletable: false,
-      options: [
-        { value: 'expert',    label: 'Expert — you can appraise the item accurately' },
-        { value: 'nonexpert', label: 'Non-Expert — you bid without expert appraisal' },
-      ],
-      explanation: 'You are the Expert. (Placeholder — Part 2 replaces this with Gary’s real role content.)',
-    },
-    {
-      field: 'kc_expert_stub', type: 'mc', system: false,
-      category: 'knowledge_check', format: 'multiple_choice',
-      grading: 'static', correct_value: 'a', role_target: 'expert',
-      prompt: 'PLACEHOLDER knowledge-check question (real content in Part 2). Which option is marked correct in this stub?',
-      placeholder: '', order: 10, hidden: false, deletable: false,
-      options: [
-        { value: 'a', label: 'This one (the stub’s correct answer).' },
-        { value: 'b', label: 'Not this one.' },
-        { value: 'c', label: 'Not this one either.' },
-      ],
-      explanation: 'This is a placeholder question so the KC flow has a graded item end-to-end; Part 2 replaces it.',
-    },
-    {
-      field: 'prep_expert_reflection', type: 'text', system: false,
-      category: 'preparation', format: 'text', role_target: 'expert',
-      prompt: 'PLACEHOLDER reflection (real prompt in Part 2): what is your going-in strategy?',
-      placeholder: '', order: 20, hidden: false, deletable: true,
-    },
-
-    // ══ ROLE: nonexpert ══════════════════════════════════════════════════════
-    {
-      field: 'kc_gate_nonexpert', type: 'mc', system: true,
-      category: 'knowledge_check', format: 'multiple_choice',
-      grading: 'assigned_role', role_target: 'nonexpert',
-      prompt: 'What is your role in this auction?',
-      placeholder: '', order: 0, hidden: false, deletable: false,
-      options: [
-        { value: 'expert',    label: 'Expert — you can appraise the item accurately' },
-        { value: 'nonexpert', label: 'Non-Expert — you bid without expert appraisal' },
-      ],
-      explanation: 'You are a Non-Expert. (Placeholder — Part 2 replaces this with Gary’s real role content.)',
-    },
-    {
-      field: 'kc_nonexpert_stub', type: 'mc', system: false,
-      category: 'knowledge_check', format: 'multiple_choice',
-      grading: 'static', correct_value: 'a', role_target: 'nonexpert',
-      prompt: 'PLACEHOLDER knowledge-check question (real content in Part 2). Which option is marked correct in this stub?',
-      placeholder: '', order: 10, hidden: false, deletable: false,
-      options: [
-        { value: 'a', label: 'This one (the stub’s correct answer).' },
-        { value: 'b', label: 'Not this one.' },
-        { value: 'c', label: 'Not this one either.' },
-      ],
-      explanation: 'This is a placeholder question so the KC flow has a graded item end-to-end; Part 2 replaces it.',
-    },
-    {
-      field: 'prep_nonexpert_reflection', type: 'text', system: false,
-      category: 'preparation', format: 'text', role_target: 'nonexpert',
+      field: 'prep_bidder_reflection', type: 'text', system: false,
+      category: 'preparation', format: 'text', role_target: 'bidder',
       prompt: 'PLACEHOLDER reflection (real prompt in Part 2): what is your going-in strategy?',
       placeholder: '', order: 20, hidden: false, deletable: true,
     },

@@ -1,13 +1,12 @@
 /**
- * eBay PART 1 skeleton — EMULATOR play-through (Playwright, real browser).
+ * eBay SINGLE-ROLE skeleton — EMULATOR play-through (Playwright, real browser).
  *
- * A UI-driven regression harness for the Part 1 blank canvas. 8 students → two
- * groups of { expert:1, nonexpert:3 }. Adapted from Baxter's baxter-playthrough.mjs
- * (emulator-based, driven instructor gates), retargeted to eBay's single-round
- * skeleton. Students bootstrap via the DEV `?_pid=&_gid=` _test bypass; the
- * instructor is driven via the REAL dashboard buttons (Generate Code / Match Now /
- * the deadlock-override control / Score & Record); all reads hit the emulator
- * Firestore REST endpoint with `Bearer owner`.
+ * A UI-driven regression harness. 13 students, ONE role `bidder` → single-role
+ * matching tiles to [5,4,4] (spec §2b): a 4→5 flex group plus two of 4. Students
+ * bootstrap via the DEV `?_pid=&_gid=` _test bypass; the instructor is driven via the
+ * REAL dashboard buttons (Generate Code / Match Now / the deadlock-override control /
+ * Score & Record); all reads hit the emulator Firestore REST endpoint with
+ * `Bearer owner`.
  *
  * NON-NEGOTIABLE (Baxter lessons baked in):
  *  • Every student state transition is driven by CLICKING THE ACTUAL BUTTON /
@@ -21,15 +20,22 @@
  *    button's real POST lands on it (POST + 200 asserted). Nothing is stubbed to pass.
  *
  * COVERAGE (student launch → grade push):
- *   1. Instructor: dashboard loads, roster visible (8 students).
- *   2. Both roles launch, correct role assigned.
- *   3. KC stub for both roles: role gate + graded MC (✓ Correct) + reflection.
- *   4. Info-document phase: the role sheet link is present AND resolves for both roles.
- *   5. Matching: two groups form as { expert:1, nonexpert:3 }.
+ *   1. Instructor: dashboard loads, roster visible (all 13 students).
+ *   2. Every student launches as the single role `bidder` (no role branch).
+ *   3. KC has NO role gate: the KnowledgeCheck UI auto-skips to the reflection.
+ *   4. Info-document phase: the role sheet link is present AND resolves (shared eBay.pdf).
+ *   5. Matching: 13 → [5,4,4] — R1 all placed, 4→5 flex, R2 exactly one expert
+ *      (bidderIndex 1) per group, each student's payload carries their own endowment,
+ *      and vCommon is absent from every client-readable group doc.
  *   6. Outcome: a `price` deal is accepted + persisted (schema-valid).
  *   7. Deadlock override: the dashboard control submits { price } (NOT { placeholder }) —
  *      locks in the Part-1 fix of the latent Hawks-scaffold bug.
- *   8. Finalize: Score & Record → stub scoring runs → real grade push fires (POST + 200).
+ *   8. No-deal walk-away: present-but-no-bid students score raw 0 (present), NOT −2.
+ *   9. Finalize: Score & Record → stub scoring runs → real grade push fires (POST + 200).
+ *
+ * REMOVED vs the 2-role baseline (obsolete under single role): the "2 expert + 6
+ * nonexpert" role-count assertion, the KC role-gate assertion, and the KC graded-MC
+ * "✓ Correct" assertion (there is no gate and no graded MC anymore).
  *
  * ── ONE-COMMAND RUN ──────────────────────────────────────────────────────────
  *   From the eBay repo root (where playwright resolves):
@@ -61,15 +67,10 @@ const PORTS = [9101, 5005, 8082, 9002, 5006, 4002, 5173]
 
 // A fresh instance id per run so re-runs never collide.
 const GID  = process.env.GID ?? `pt-${Date.now()}`
-const PIDS = Array.from({ length: 8 }, (_, i) => `stu-${i + 1}`)
-
-// eBay KC gate radio labels (correct answer for the assigned-role gate = own role).
-const GATE_RADIO = {
-  expert:    'Expert — you can appraise the item accurately',
-  nonexpert: 'Non-Expert — you bid without expert appraisal',
-}
-// The single graded stub MC — correct option label (server-marked correct_value 'a').
-const KC_CORRECT_MC = "This one (the stub’s correct answer)."
+// 13 students → single-role matching tiles to [5,4,4] (spec §2b): a flex group of 5
+// plus two of 4 — enough to exercise happy-deal + deadlock-override + no-deal (the
+// present-but-no-bid case) in one run, and to prove the 4→5 flex places everyone.
+const PIDS = Array.from({ length: 13 }, (_, i) => `stu-${i + 1}`)
 
 // Placeholder prices: happy-path group vs deadlock-override group.
 const HAPPY_PRICE    = 500
@@ -140,15 +141,22 @@ const arrVal = f => (f?.arrayValue?.values ?? []).map(v => v.stringValue)
 
 async function readParticipants() {
   const docs = await fsGetDocs('participants')
-  return docs.map(d => ({
-    id:               d.name.split('/').pop(),
-    role:             strVal(d.fields?.role),
-    is_lead:          d.fields?.is_lead?.booleanValue ?? false,
-    group_id:         strVal(d.fields?.group_id),
-    raw_score:        numVal(d.fields?.raw_score),
-    normalized_score: numVal(d.fields?.normalized_score),
-    knowledge_check_score: numVal(d.fields?.knowledge_check_score),
-  }))
+  return docs.map(d => {
+    // auction_endowment is a map field written by the assignEndowments trigger.
+    const endow = d.fields?.auction_endowment?.mapValue?.fields
+    return {
+      id:               d.name.split('/').pop(),
+      role:             strVal(d.fields?.role),
+      is_lead:          d.fields?.is_lead?.booleanValue ?? false,
+      group_id:         strVal(d.fields?.group_id),
+      raw_score:        numVal(d.fields?.raw_score),
+      normalized_score: numVal(d.fields?.normalized_score),
+      knowledge_check_score: numVal(d.fields?.knowledge_check_score),
+      // Own endowment (the client-readable payload); undefined until the trigger runs.
+      bidderIndex:      endow ? numVal(endow.bidderIndex) : null,
+      hasEndowment:     endow != null,
+    }
+  })
 }
 async function readGroups() {
   const docs = await fsGetDocs('groups')
@@ -158,9 +166,11 @@ async function readGroups() {
       id:        d.name.split('/').pop(),
       status:    strVal(d.fields?.status),
       agreement: d.fields?.agreement_reached?.booleanValue ?? null,
-      expert:    arrVal(d.fields?.expert_participants),
-      nonexpert: arrVal(d.fields?.nonexpert_participants),
+      bidders:   arrVal(d.fields?.bidder_participants),   // single-role membership
       lead:      strVal(d.fields?.lead_participant_id),
+      // vCommon must NEVER be on the client-readable group doc (it lives in a
+      // server-only truth subcollection). Capture it so we can assert its absence.
+      vCommonOnGroup: d.fields?.vCommon !== undefined,
       // The placeholder outcome: single `price` decimal (+ optional notes).
       price:     outcome?.price != null ? numVal(outcome.price) : null,
       hasOutcome: outcome != null,
@@ -175,6 +185,19 @@ async function pollGroups(pred, maxMs = 30_000) {
     await sleep(700)
   }
   return readGroups()
+}
+// Endowments are written by the assignEndowments onCreate TRIGGER, which fires
+// asynchronously AFTER triggerMatching commits the group docs — so participant docs
+// gain auction_endowment a beat after group_id. Poll until the predicate holds.
+async function pollParticipants(pred, maxMs = 30_000) {
+  const start = Date.now()
+  let ps = await readParticipants()
+  while (Date.now() - start < maxMs) {
+    ps = await readParticipants()
+    if (ps.length && pred(ps)) return ps
+    await sleep(700)
+  }
+  return ps
 }
 async function readAttendanceCode() {
   const doc = await fsGetDoc('attendance_code/current')
@@ -205,41 +228,29 @@ async function ensureOnRolePage(page, pid) {
 }
 
 async function driveSetup(page, pid) {
+  // SINGLE ROLE: everyone is a Bidder (the info page shows "Your role: Bidder").
   const roleLabel = ((await page.locator('h1').first().textContent()) ?? '').trim()
-  const role = roleLabel.toLowerCase().includes('non') ? 'nonexpert' : 'expert'
-  log(pid, `info: "${roleLabel}" (${role})`)
+  log(pid, `info: "${roleLabel}" (bidder)`)
 
-  // (4) Info-document phase (Part 2): BOTH roles point at the ONE shared case PDF, eBay.pdf.
+  // Info-document phase: the ONE shared case PDF, eBay.pdf, for the single role.
   const sheetLink = page.locator('a', { hasText: 'Role sheet' }).first()
   await sheetLink.waitFor({ timeout: 15_000 })
   const href = await sheetLink.getAttribute('href')
   assert(href === '/role-info/eBay.pdf',
-    `Info doc — ${role} role sheet link points at the shared eBay.pdf (href=${href})`)
+    `Info doc — the bidder role sheet link points at the shared eBay.pdf (href=${href})`)
 
   await page.click('button:has-text("Continue")')
 
-  // (3) KC role gate (assigned_role; correct answer = own role → must pass to proceed).
-  await page.waitForSelector('text=What is your role in this auction?', { timeout: 30_000 })
-  await page.getByRole('radio', { name: GATE_RADIO[role], exact: true }).click()
-  await page.click('button:has-text("Submit")')
-
-  // (3) ONE graded stub MC — click the correct option → assert ✓ Correct → Continue.
-  await page.waitForSelector('p:has-text("Concept check — 1 of 1")', { timeout: 30_000 })
-  await page.getByRole('radio', { name: KC_CORRECT_MC }).click()
-  await page.click('button:has-text("Submit")')
-  const gotCorrect = await page.waitForSelector('text=✓ Correct', { timeout: 15_000 })
-    .then(() => true).catch(() => false)
-  assert(gotCorrect, `KC/${role} — graded stub MC marks the correct option ✓ Correct`)
-  await page.click('button:has-text("Continue")')
-
-  // Reflection (ungraded free text).
+  // KC has NO role gate now (single-role move). The shared KnowledgeCheck UI, finding
+  // no gate question, auto-completes and advances straight to the reflection — there is
+  // no gate screen and no graded MC to drive. Reflection (ungraded free text) only.
   await page.waitForSelector('p:has-text("Preparation — 1 of 1")', { timeout: 30_000 })
-  await page.locator('textarea').fill(`${role} plan: bid to my value, avoid the winner's curse.`)
+  await page.locator('textarea').fill(`Bidder plan: bid to my value, avoid the winner's curse.`)
   await page.click('button:has-text("Complete")')
 
   await page.waitForSelector('h1:has-text("Preparation complete")', { timeout: 30_000 })
   log(pid, '◆ hold screen')
-  return { page, pid, role }
+  return { page, pid, role: 'bidder' }
 }
 
 // ── Phase 1b: hold → confirmation → attendance code → waiting room ──────────────
@@ -284,6 +295,20 @@ async function reportPriceDeal(members, price) {
   // Confirm one at a time — submitConfirmation is a transaction on the shared group doc, and the
   // Firestore emulator lock-times-out under concurrent transactions on one doc (same failure mode
   // as role_counts). Sequential confirms keep it deterministic.
+  for (const m of nonLeads) {
+    await m.page.waitForSelector('h1:has-text("Confirm the outcome")', { timeout: 30_000 })
+    await m.page.click('button:has-text("Confirm")')
+  }
+}
+
+/** Lead reports NO DEAL (walk-away); all non-leads Confirm. Present-but-no-bid case. */
+async function reportNoDeal(members) {
+  const lead = members.find(m => m.is_lead) ?? members[0]
+  const nonLeads = members.filter(m => m !== lead)
+  await lead.page.waitForSelector('h1:has-text("Report outcome")', { timeout: 30_000 })
+  await lead.page.click('button:has-text("No deal")')
+  await lead.page.waitForSelector('h1:has-text("Confirm no deal")', { timeout: 10_000 })
+  await lead.page.click('button:has-text("Yes, no deal")')
   for (const m of nonLeads) {
     await m.page.waitForSelector('h1:has-text("Confirm the outcome")', { timeout: 30_000 })
     await m.page.click('button:has-text("Confirm")')
@@ -443,8 +468,8 @@ async function main() {
     log('warmup', 'stack warm ✅')
   }
 
-  // ── (2,3,4) Launch all 8 students; each drives info → KC → prep → hold ──────
-  banner('Phase 1 — 8 students: info → KC stub → reflection → hold')
+  // ── Launch all students; each drives info → (KC auto-skips) → reflection → hold ──
+  banner(`Phase 1 — ${PIDS.length} students: info → reflection → hold (single role)`)
   for (const pid of PIDS) {
     const ctx  = await browser.newContext()
     const page = await ctx.newPage()
@@ -454,16 +479,15 @@ async function main() {
   // Step 1 — assign roles SEQUENTIALLY (one assignRole transaction at a time → no role_counts
   // lock-timeout contention in the Firestore emulator). Fast: each is a single page load.
   for (const s of students) await ensureOnRolePage(s.page, s.pid)
-  // Step 2 — drive the rest (info assert → KC → prep → hold) CONCURRENTLY: these write
+  // Step 2 — drive the rest (info assert → reflection → hold) CONCURRENTLY: these write
   // per-participant docs only, so there is no shared-doc transaction to contend on.
   await Promise.all(students.map(async s => {
     const r = await driveSetup(s.page, s.pid)
     s.role = r.role
   }))
-  const expertCount = students.filter(s => s.role === 'expert').length
-  const nonexpertCount = students.filter(s => s.role === 'nonexpert').length
-  assert(expertCount === 2 && nonexpertCount === 6,
-    `Roles assigned — 8 students → 2 expert + 6 nonexpert (got ${expertCount} + ${nonexpertCount})`)
+  const bidderCount = students.filter(s => s.role === 'bidder').length
+  assert(bidderCount === PIDS.length,
+    `Roles assigned — all ${PIDS.length} students launch as the single role \`bidder\` (got ${bidderCount})`)
 
   // (4) The ONE shared case PDF must RESOLVE over the frontend origin (not 404 / SPA fallback).
   const pdf = await fetch(`${FE}/role-info/eBay.pdf`)
@@ -489,12 +513,12 @@ async function main() {
   dash.setDefaultTimeout(60_000)
   await dash.goto(dashboardUrl())
   await dash.waitForSelector('h1:has-text("Instructor Dashboard — eBay")', { timeout: 60_000 })
-  // Roster shows all 8 participants (their pids/names appear in the roster table).
+  // Roster shows all participants (their pids/names appear in the roster table).
   const rosterReady = await dash.waitForSelector('table', { timeout: 30_000 }).then(() => true).catch(() => false)
   let rosterNames = 0
   for (const pid of PIDS) if (await dash.locator(`text=${pid}`).count() > 0) rosterNames++
-  assert(rosterReady && rosterNames === 8,
-    `Dashboard — roster visible with all 8 participants (found ${rosterNames}/8)`)
+  assert(rosterReady && rosterNames === PIDS.length,
+    `Dashboard — roster visible with all ${PIDS.length} participants (found ${rosterNames}/${PIDS.length})`)
 
   // ── Generate attendance code (dashboard UI), read the value, drive to waiting ──
   await dash.click('button:has-text("Generate Code")')
@@ -503,28 +527,57 @@ async function main() {
   assert(!!code, `Attendance — "Generate Code" produced a code (${code})`)
   await Promise.all(students.map(s => driveToWaiting(s, code)))
 
-  // ── (5) Match (dashboard UI) → two groups of { expert:1, nonexpert:3 } ─────
-  banner('Match — two groups of { expert:1, nonexpert:3 }')
+  // ── (5) Match (dashboard UI) → single-role tiling: 13 → [5,4,4] (spec §2b) ──
+  banner('Match — single-role tiling: 13 students → [5,4,4] (4→5 flex, all placed)')
   await dash.waitForSelector('button:has-text("Match Now"):not([disabled])', { timeout: 30_000 })
   await dash.click('button:has-text("Match Now")')
-  await pollGroups(gs => gs.length === 2, 30_000)
+  await pollGroups(gs => gs.length === 3, 30_000)
   const groups0 = await readGroups()
-  assert(groups0.length === 2, `Matching — exactly 2 groups formed (got ${groups0.length})`)
-  const allWellFormed = groups0.every(g => g.expert.length === 1 && g.nonexpert.length === 3)
-  assert(allWellFormed,
-    `Matching — every group is { expert:1, nonexpert:3 } (${groups0.map(g => `${g.expert.length}+${g.nonexpert.length}`).join(', ')})`)
+  assert(groups0.length === 3, `Matching — exactly 3 groups formed (got ${groups0.length})`)
+  const sizes = groups0.map(g => g.bidders.length).sort((a, b) => a - b)
+  assert(JSON.stringify(sizes) === JSON.stringify([4, 4, 5]),
+    `Matching — sizes tile to [4,4,5] (4→5 flex) (got [${sizes.join(',')}])`)
+  const totalPlaced = groups0.reduce((n, g) => n + g.bidders.length, 0)
+  assert(totalPlaced === PIDS.length,
+    `Matching (R1) — every student placed, no orphans (${totalPlaced}/${PIDS.length})`)
+  // vCommon must NOT be on any client-readable group doc.
+  assert(groups0.every(g => !g.vCommonOnGroup),
+    `Endowment — vCommon is absent from every client-readable group doc (server-only truth)`)
 
-  // Map browser students → their group (+ is_lead) from Firestore truth.
-  const parts = await readParticipants()
+  // Map browser students → their group (+ is_lead) from Firestore truth. WAIT for the
+  // async endowment trigger to stamp every matched participant before asserting.
+  const parts = await pollParticipants(
+    ps => {
+      const matched = ps.filter(p => p.group_id)
+      return matched.length === PIDS.length && matched.every(p => p.hasEndowment)
+    },
+    30_000,
+  )
   const byPid = Object.fromEntries(parts.map(p => [p.id, p]))
   const membersOf = gid => students
     .filter(s => byPid[s.pid]?.group_id === gid)
     .map(s => ({ ...s, is_lead: byPid[s.pid].is_lead, role: byPid[s.pid].role }))
+
+  // (R2) Exactly one expert (bidderIndex 1) per group, guaranteed by construction; and
+  // every matched student carries their OWN endowment (the client-readable payload).
+  const everyoneEndowed = parts.filter(p => p.group_id).every(p => p.hasEndowment && p.bidderIndex >= 1)
+  assert(everyoneEndowed,
+    `Endowment — every matched student's payload carries their own auction_endowment (bidderIndex)`)
+  const oneExpertEach = groups0.every(g => {
+    const idx1 = g.bidders.map(pid => byPid[pid]?.bidderIndex).filter(i => i === 1)
+    return idx1.length === 1
+  })
+  assert(oneExpertEach,
+    `Endowment (R2) — exactly one expert (bidderIndex 1) per group (${groups0.map(g => g.bidders.map(pid => byPid[pid]?.bidderIndex).sort().join('')).join(' | ')})`)
+
+  // Scenario allocation across the 3 groups (deterministic by sorted group id).
   const gids = groups0.map(g => g.id).sort()
   const happyGid    = gids[0]
   const deadlockGid = gids[1]
+  const noDealGid   = gids[2]
   const happyMembers    = membersOf(happyGid)
   const deadlockMembers = membersOf(deadlockGid)
+  const noDealMembers   = membersOf(noDealGid)
 
   // ── (6) Happy group: a `price` deal, accepted + persisted ──────────────────
   banner(`Outcome — happy group: price ${HAPPY_PRICE} deal`)
@@ -564,32 +617,50 @@ async function main() {
   assert(gResolved?.status === 'completed' && gResolved?.price === DEADLOCK_PRICE,
     `Deadlock override — control submits { price } (NOT { placeholder }): group completes with price=${gResolved?.price}`)
 
+  // ── No-deal group: present students who walk away (the "present but no bid" case) ──
+  banner('Outcome — no-deal group: lead reports NO DEAL, all confirm (present, zero outcome)')
+  await startGroupToReport(noDealMembers)
+  await reportNoDeal(noDealMembers)
+  const gNoDeal = (await pollGroups(gs => gs.find(x => x.id === noDealGid)?.status === 'completed', 30_000))
+    .find(x => x.id === noDealGid)
+  assert(gNoDeal?.status === 'completed' && gNoDeal?.agreement === false,
+    `Outcome — no-deal walk-away persisted (status=${gNoDeal?.status}, agreement=${gNoDeal?.agreement})`)
+
   // ── (8) Score & Record (dashboard UI) → stub scoring → grade push (POST + 200) ──
   banner('Finalize — Score & Record → stub scoring → grade push (POST + 200)')
   await dash.click('button:has-text("Score & Record")')
   // The push is async; wait for the mock to receive one GameResult per participant.
   const isResult = r => r.result && typeof r.result === 'object' && typeof r.result.participant_id === 'string'
   const start = Date.now()
-  while (mock.received.filter(isResult).length < 8 && Date.now() - start < 30_000) await sleep(500)
+  while (mock.received.filter(isResult).length < PIDS.length && Date.now() - start < 30_000) await sleep(500)
   const pushed = mock.received.filter(isResult)
   log('push', `mock received ${mock.received.length} request(s); ${pushed.length} are GameResult POSTs`)
-  assert(pushed.length >= 8,
+  assert(pushed.length >= PIDS.length,
     `Grade push — the classroom callback received ${pushed.length} GameResult POSTs (one per participant; push fired)`)
   assert(pushed.length > 0 && pushed.every(r => typeof r.result.normalized_score === 'number' || r.result.normalized_score === null),
     `Grade push — every pushed GameResult carries a normalized_score field`)
   assert(pushed.length > 0 && pushed.every(r => typeof r.auth === 'string' && r.auth.startsWith('Bearer ')),
     `Grade push — every push is authenticated with the callback Bearer secret`)
 
-  // Stub scoring wrote raw_score = the group's price, for both roles.
+  // Stub scoring wrote raw_score = the group's price (single role → one z-score pool).
   const partsFinal = await readParticipants()
   const happyRaws = partsFinal.filter(p => p.group_id === happyGid).map(p => p.raw_score)
   const deadRaws  = partsFinal.filter(p => p.group_id === deadlockGid).map(p => p.raw_score)
-  assert(happyRaws.length === 4 && happyRaws.every(s => s === HAPPY_PRICE),
-    `Scoring — stub echoes price: happy group raw_score all === ${HAPPY_PRICE}`)
-  assert(deadRaws.length === 4 && deadRaws.every(s => s === DEADLOCK_PRICE),
-    `Scoring — stub echoes price: deadlock group raw_score all === ${DEADLOCK_PRICE}`)
+  const noDealParts = partsFinal.filter(p => p.group_id === noDealGid)
+  assert(happyRaws.length === happyMembers.length && happyRaws.every(s => s === HAPPY_PRICE),
+    `Scoring — stub echoes price: happy group (${happyMembers.length}) raw_score all === ${HAPPY_PRICE}`)
+  assert(deadRaws.length === deadlockMembers.length && deadRaws.every(s => s === DEADLOCK_PRICE),
+    `Scoring — stub echoes price: deadlock group (${deadlockMembers.length}) raw_score all === ${DEADLOCK_PRICE}`)
   assert(partsFinal.every(p => typeof p.normalized_score === 'number'),
     `Scoring — every participant has a normalized (z) score`)
+
+  // GRADING TRAP: a student who attended and reached the auction but placed NO bid
+  // (the no-deal, zero-outcome group) is PRESENT, not a no-show. They score the
+  // present-student floor (raw 0), NEVER the no-show −2.
+  assert(noDealParts.length === noDealMembers.length && noDealParts.every(p => p.raw_score === 0),
+    `Scoring — no-bid present students score raw 0 (walk-away), not treated as absent (${noDealParts.map(p => p.raw_score).join(',')})`)
+  assert(noDealParts.every(p => typeof p.normalized_score === 'number' && p.normalized_score !== -2),
+    `Scoring — no-bid present students get a present z-score, NOT the no-show −2 (${noDealParts.map(p => p.normalized_score).join(',')})`)
 }
 
 // ── Entry point ─────────────────────────────────────────────────────────────────

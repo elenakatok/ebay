@@ -5,7 +5,8 @@ import { extractInstructorGameId } from '@mygames/game-server'
 import { computeScoreBreakdown, ebayGameDef } from './gameDefinition'
 
 // Exported so updateGroupContract can build identical rows without duplicating these.
-export const VALID_ROLES = new Set(['expert', 'nonexpert'])
+// Derived from the role config (single role `bidder`) so it never drifts.
+export const VALID_ROLES = new Set(ebayGameDef.roles.roles.map(r => r.key))
 
 // Text questions from prepDefaults — read once at module load.
 export const TEXT_QUESTIONS = (ebayGameDef.prepDefaults ?? [])
