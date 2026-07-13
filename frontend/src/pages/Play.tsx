@@ -1,11 +1,12 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { doc, getDoc, onSnapshot } from 'firebase/firestore'
 import { httpsCallable } from 'firebase/functions'
 import { auth, db, rtdb, functions } from '../firebase'
-import { assignRole, confirmReady, verifyAttendanceCode, submitBid, CLASSROOM_URL } from '../api'
+import { assignRole, confirmReady, verifyAttendanceCode, submitBid, checkAuctionClose, CLASSROOM_URL } from '../api'
 import AuctionBidding from '../auction/AuctionBidding'
+import AuctionResults, { type AuctionResult } from '../auction/AuctionResults'
 import { useAuctionNode } from '../auction/useAuctionNode'
-import { ebayAuctionLabels, ebayBidderLabel, ebayPrivateInfo, EBAY_CONFIRM, type EbayEndowment } from '../ebayAuctionLabels'
+import { ebayAuctionLabels, ebayAuctionResultsLabels, ebayBidderLabel, ebayPrivateInfo, EBAY_CONFIRM, type EbayEndowment } from '../ebayAuctionLabels'
 import {
   useStudentSession,
   KnowledgeCheck,
@@ -134,6 +135,7 @@ function useEbayAuction(iid: string | null, pid: string | null) {
   const [groupId, setGroupId]     = useState<string | null>(null)
   const [endowment, setEndowment] = useState<EbayEndowment | null>(null)
   const [numBidders, setNumBidders] = useState(0)
+  const [result, setResult]       = useState<AuctionResult | null>(null)
 
   useEffect(() => {
     if (!iid || !pid) return
@@ -142,6 +144,9 @@ function useEbayAuction(iid: string | null, pid: string | null) {
       setGroupId(typeof d.group_id === 'string' && d.group_id ? d.group_id : null)
       const e = d.auction_endowment
       if (e && typeof e.bidderIndex === 'number') setEndowment(e as EbayEndowment)
+      // The full reveal lands on the student's OWN participant doc at resolution
+      // (member-only read; vCommon/maxes are copied here, never un-denied at source).
+      setResult((d.auction_result as AuctionResult | undefined) ?? null)
     })
     return () => off()
   }, [iid, pid])
@@ -156,8 +161,32 @@ function useEbayAuction(iid: string | null, pid: string | null) {
   }, [iid, groupId])
 
   const { live, serverOffsetMs } = useAuctionNode(rtdb, iid, groupId)
+
+  // CLOSE TRIGGER: no scheduled function — whoever observes the passed deadline drives
+  // resolution. Fire checkAuctionClose at the deadline (or immediately if we loaded
+  // after it), once, until the result lands. Concurrent members racing here is fine —
+  // the server election is idempotent.
+  const firedRef = useRef(false)
+  useEffect(() => {
+    firedRef.current = false   // reset when the group/auction identity changes
+  }, [groupId, live?.endsAtMs])
+  useEffect(() => {
+    if (!iid || !groupId || !live || result) return
+    if (live.status !== 'open' && live.status !== 'closed') return
+    const fire = () => {
+      if (firedRef.current) return
+      firedRef.current = true
+      checkAuctionClose({}, groupId).catch(() => { firedRef.current = false })
+    }
+    const msLeft = live.endsAtMs - (Date.now() + serverOffsetMs)
+    if (msLeft <= 0) { fire(); return }
+    const t = setTimeout(fire, msLeft + 400)
+    return () => clearTimeout(t)
+  }, [iid, groupId, live, serverOffsetMs, result])
+
   return {
-    active: live?.status === 'open',
+    result,
+    showBidding: !result && live?.status != null,
     live, serverOffsetMs, endowment, numBidders, groupId,
   }
 }
@@ -269,8 +298,25 @@ export default function Play() {
 
   const { participantId, gameInstanceId } = session
 
-  // ── Live-auction overlay: takes over the screen whenever the auction is OPEN ──
-  if (auction.active && auction.live && auction.endowment && auction.groupId) {
+  // ── Live-auction overlay: takes over the screen from open bidding through the
+  // full-reveal results. `result` (on the student's own participant doc) wins; while
+  // an auction node exists but is unresolved we stay on the bidding screen (which shows
+  // "Auction closed. Results coming." once the clock is up) — never a flicker to routing.
+  if (auction.result && auction.endowment) {
+    return (
+      <div style={{ fontFamily: typography.fontFamily }}>
+        <GameHeader studentLinks={headerLinks} />
+        <AuctionResults
+          labels={ebayAuctionResultsLabels}
+          result={auction.result}
+          myBidderIndex={auction.endowment.bidderIndex}
+          bidderLabel={ebayBidderLabel}
+          history={auction.live?.history ?? []}
+        />
+      </div>
+    )
+  }
+  if (auction.showBidding && auction.live && auction.endowment && auction.groupId) {
     const gid = auction.groupId
     return (
       <div style={{ fontFamily: typography.fontFamily }}>

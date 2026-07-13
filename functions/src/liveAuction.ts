@@ -29,7 +29,8 @@ import { FieldValue } from 'firebase-admin/firestore'
 import { extractInstructorGameId, extractStudentOnCallIds } from '@mygames/game-server'
 import { ebayGameDef } from './gameDefinition'
 import { applyBid, type StoredMaxes } from './auction/bidEngine'
-import { EBAY_AUCTION_SETTINGS, EBAY_STARTING_PRICE } from './ebayAuction'
+import { resolveAuction, type AuctionBid, type AuctionEndowment } from './auction/resolver'
+import { EBAY_AUCTION_SETTINGS, EBAY_STARTING_PRICE, EBAY_V_COMMON } from './ebayAuction'
 
 const def = ebayGameDef
 const START = EBAY_STARTING_PRICE
@@ -120,6 +121,168 @@ export const closeAuction = onCall({ cors: def.corsOrigins }, async (request) =>
   if (typeof gid !== 'string' || !gid) throw new HttpsError('invalid-argument', 'group_id required')
   await closeAuctionNode(iid, gid)
   return { ok: true as const }
+})
+
+// ── resolve + close (Slice 5) ─────────────────────────────────────────────────────
+//
+// CLOSE TRIGGER: the CLOCK closes the auction — there is no instructor close button.
+// Because there is no scheduled function, resolution is driven by whoever NEXT observes
+// the passed deadline (a client whose countdown hit zero, OR a student who loads the
+// page later) via the `checkAuctionClose` callable. An auction whose deadline passed
+// with nobody watching still resolves the instant someone next looks.
+//
+// IDEMPOTENCY: the RTDB status flip (closeAuctionNode) freezes bids; then a Firestore
+// transaction guarded by group.auction_resolved_at ELECTS exactly one resolver — the
+// loser of the race sees the marker present and no-ops. Inputs are frozen at close, so
+// every racer computes the identical resolution; only one writes. No double-write, one
+// winner, one clearing price.
+//
+// REVEAL WITHOUT RELAXING RULES: the confidential maxes (bids/) and vCommon
+// (truth/auction) stay DENIED to clients forever. At resolve time they are COPIED into
+// `auction_result`, which is written onto EACH member's own participant doc — readable
+// only by that member (the existing own-doc read rule), so no other group can read this
+// group's vCommon. Nothing is un-denied.
+
+interface StoredResultBidder {
+  bidderIndex: number
+  signal: number
+  privateValue: number
+  signalHalfWidth: number
+  maxAmount: number | null   // revealable at close; null = never bid
+  realizedValue: number
+  profit: number
+}
+
+/** Resolve a group's auction (idempotently) and reveal the result to its members. */
+async function resolveAndCloseAuction(iid: string, gid: string): Promise<void> {
+  const db = admin.firestore()
+  const instanceRef = db.collection('game_instances').doc(iid)
+  const groupRef = instanceRef.collection('groups').doc(gid)
+
+  // Freeze bids first (idempotent). submitBid rejects once status !== 'open', so the
+  // maxes read below cannot change under us.
+  await closeAuctionNode(iid, gid)
+
+  const groupSnap = await groupRef.get()
+  if (!groupSnap.exists) return
+  const members = groupMemberIds(groupSnap.data()!)
+  if (members.length === 0) return
+
+  // Endowments (the canonical bidder set) from participants.
+  const memberSnaps = await Promise.all(members.map(pid => instanceRef.collection('participants').doc(pid).get()))
+  const endowments: AuctionEndowment[] = []
+  for (const s of memberSnaps) {
+    const e = s.data()?.['auction_endowment'] as Partial<AuctionEndowment> | undefined
+    if (e && typeof e.bidderIndex === 'number') {
+      endowments.push({
+        bidderIndex: e.bidderIndex,
+        signal: Number(e.signal ?? 0),
+        privateValue: Number(e.privateValue ?? 0),
+        signalHalfWidth: Number(e.signalHalfWidth ?? 0),
+      })
+    }
+  }
+
+  // Confidential maxes (one per bidder = their FINAL/highest) from the rules-denied subcollection.
+  const bidsSnap = await bidsCol(iid, gid).get()
+  const maxByIndex = new Map<number, number>()
+  const bids: AuctionBid[] = []
+  for (const b of bidsSnap.docs) {
+    const d = b.data()
+    if (typeof d['bidderIndex'] === 'number' && typeof d['maxAmount'] === 'number') {
+      maxByIndex.set(d['bidderIndex'], d['maxAmount'])
+      bids.push({ bidderIndex: d['bidderIndex'], maxAmount: d['maxAmount'], serverTimestampMs: Number(d['serverTimestampMs'] ?? 0) })
+    }
+  }
+
+  // vCommon from the rules-denied truth doc.
+  const truthSnap = await groupRef.collection('truth').doc('auction').get()
+  const vCommon = Number(truthSnap.data()?.['vCommon'] ?? EBAY_V_COMMON)
+
+  const node = (await auctionRef(iid, gid).get()).val() as AuctionNode | null
+  const settings = { ...EBAY_AUCTION_SETTINGS, increment: node?.increment ?? EBAY_AUCTION_SETTINGS.increment }
+
+  // The PURE resolver — unmodified. One entry per bidder = their final max.
+  const resolution = resolveAuction(bids, endowments, vCommon, settings, START)
+  const byIndex = new Map(resolution.perBidder.map(p => [p.bidderIndex, p]))
+
+  const perBidder: StoredResultBidder[] = endowments
+    .slice()
+    .sort((a, b) => a.bidderIndex - b.bidderIndex)
+    .map(e => {
+      const r = byIndex.get(e.bidderIndex)
+      return {
+        bidderIndex: e.bidderIndex,
+        signal: e.signal,
+        privateValue: e.privateValue,
+        signalHalfWidth: e.signalHalfWidth,
+        maxAmount: maxByIndex.get(e.bidderIndex) ?? null,
+        realizedValue: r?.realizedValue ?? vCommon + e.privateValue,
+        profit: r?.profit ?? 0,
+      }
+    })
+
+  const resolvedAtMs = Date.now()
+  const auctionResult = {
+    winnerBidderIndex: resolution.winnerBidderIndex,
+    clearingPrice: resolution.clearingPrice,
+    vCommon,                                   // revealable now — the auction is over
+    perBidder,
+    resolvedAtMs,
+  }
+
+  // Idempotent commit: elect one resolver, then reveal to each member's OWN doc.
+  await db.runTransaction(async (tx) => {
+    const g = await tx.get(groupRef)
+    if (g.data()?.['auction_resolved_at'] != null) return   // already resolved — no-op
+    tx.set(groupRef, {
+      auction_resolved_at: resolvedAtMs,
+      status: 'completed',
+      agreement_reached: resolution.winnerBidderIndex !== null,
+      // Placeholder outcome for the UNCHANGED scoring stub (echoes price); Slice 6
+      // replaces this with the real participation/KC grade. vCommon is NOT stored here
+      // (the group doc is broadly readable) — only the public clearing price.
+      outcome: resolution.winnerBidderIndex !== null
+        ? { price: resolution.clearingPrice ?? 0 }
+        : { no_deal: true },
+    }, { merge: true })
+    for (const pid of members) {
+      tx.set(instanceRef.collection('participants').doc(pid), { auction_result: auctionResult }, { merge: true })
+    }
+  })
+}
+
+// ── checkAuctionClose (student group member) — the deadline-observed close trigger ──
+export const checkAuctionClose = onCall({ cors: def.corsOrigins }, async (request) => {
+  const data = request.data as Record<string, unknown>
+  const isEmulator = process.env.FUNCTIONS_EMULATOR === 'true'
+  const authHeader = request.rawRequest.headers.authorization as string | undefined
+  const { participantId, gameInstanceId: iid } = await extractStudentOnCallIds(data, isEmulator, authHeader)
+
+  const gid = data['group_id']
+  if (typeof gid !== 'string' || !gid) throw new HttpsError('invalid-argument', 'group_id required')
+
+  const db = admin.firestore()
+  const instanceRef = db.collection('game_instances').doc(iid)
+  const pSnap = await instanceRef.collection('participants').doc(participantId).get()
+  if (!pSnap.exists || pSnap.data()!['group_id'] !== gid) {
+    throw new HttpsError('permission-denied', 'Not a member of this group')
+  }
+
+  const groupRef = instanceRef.collection('groups').doc(gid)
+  if ((await groupRef.get()).data()?.['auction_resolved_at'] != null) {
+    return { ok: true as const, resolved: true, alreadyResolved: true }
+  }
+
+  const node = (await auctionRef(iid, gid).get()).val() as AuctionNode | null
+  if (!node) return { ok: true as const, resolved: false, reason: 'no-auction' as const }
+  // Only the CLOCK closes: resolve iff the server deadline has passed (or already closed).
+  if (node.status === 'open' && Date.now() <= node.endsAtMs) {
+    return { ok: true as const, resolved: false, reason: 'still-open' as const }
+  }
+
+  await resolveAndCloseAuction(iid, gid)
+  return { ok: true as const, resolved: true }
 })
 
 // ── submitBid (student; the hot path) ────────────────────────────────────────────

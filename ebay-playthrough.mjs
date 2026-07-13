@@ -281,6 +281,34 @@ async function uiBid(page, amount) {
   await page.locator('[data-testid="auction-place-bid"]').click()
 }
 
+// ── Slice 5: close-on-deadline → resolve → full-reveal results ────────────────────
+const RESULTS_SCREEN = '[data-testid="auction-results"]'
+const waitResults = (page, ms = 30_000) => page.waitForSelector(RESULTS_SCREEN, { timeout: ms })
+const dataAttr = (page, testid, a) => page.locator(`[data-testid="${testid}"]`).getAttribute(a)
+// ADVERSARIAL/SECURITY helper: the deadline-observed close trigger, as a direct callable.
+const checkCloseFn = (pid, gid) => callFn('checkAuctionClose', { _test: { participant_id: pid, game_instance_id: GID }, group_id: gid })
+// Read the stored reveal (auction_result) off a member's participant doc via owner REST.
+const restNum = f => (f?.integerValue != null ? parseInt(f.integerValue, 10) : (f?.doubleValue != null ? f.doubleValue : null))
+async function readStoredResult(pid) {
+  const d = await fsGetDoc(`participants/${pid}`)
+  const f = d?.fields?.auction_result?.mapValue?.fields
+  if (!f) return null
+  const perBidder = (f.perBidder?.arrayValue?.values ?? []).map(v => {
+    const b = v.mapValue.fields
+    return { bidderIndex: restNum(b.bidderIndex), maxAmount: restNum(b.maxAmount), profit: restNum(b.profit) }
+  })
+  return { winner: restNum(f.winnerBidderIndex), clearing: restNum(f.clearingPrice), vCommon: restNum(f.vCommon), resolvedAtMs: restNum(f.resolvedAtMs), perBidder }
+}
+async function pollStoredResult(pid, ms = 40_000) {
+  const start = Date.now()
+  let r = await readStoredResult(pid)
+  while (Date.now() - start < ms && !r) { await sleep(700); r = await readStoredResult(pid) }
+  return r
+}
+// Read every results-row's {bidder, max, profit} from a rendered reveal table.
+const readResultRows = page => page.locator('[data-testid="results-row"]').evaluateAll(
+  rows => rows.map(r => ({ bidder: Number(r.dataset.bidder), max: r.dataset.max, profit: Number(r.dataset.profit), won: r.dataset.won === 'true' })))
+
 // ── Student / dashboard URLs (DEV bypasses) ─────────────────────────────────────
 
 const studentUrl   = pid => `${FE}/?_pid=${pid}&_gid=${GID}&_session=tab`
@@ -684,9 +712,11 @@ async function main() {
   // Every student bid below is a real fill-field + click-Place-bid on the student's own
   // browser (the Slice 3 harness poked submitBid directly; those calls are GONE). The
   // instructor Start/Close are the real dashboard buttons.
-  banner('Live auction — Start button + STORED duration override (60s, not 600)')
+  banner('Live auction — Start button + STORED duration override (90s, not 600)')
 
-  await saveAuctionSettings(dash, 60, 1)
+  // 90s: long enough that the (long) detailed bidding regression never races the deadline;
+  // this DETAIL group then closes + resolves on its own clock, checked near the end.
+  await saveAuctionSettings(dash, 90, 1)
   await dash.goto(dashboardUrl())
   await dash.waitForSelector('h1:has-text("Instructor Dashboard — eBay")', { timeout: 30_000 })
   await dash.waitForSelector(`[data-testid="start-auction-${happyGid}"]`, { timeout: 30_000 })
@@ -694,8 +724,12 @@ async function main() {
   const aHappy = await pollAuction(happyGid, a => a?.status === 'open', 15_000)
   assert(aHappy?.status === 'open', `Auction — Start button opens the auction (status=${aHappy?.status})`)
   const span = aHappy ? (aHappy.endsAtMs - aHappy.startedAtMs) : 0
-  assert(Math.abs(span - 60_000) <= 3_000,
-    `Auction — endsAtMs reflects the STORED duration override 60s, not 600 (span=${span}ms)`)
+  assert(Math.abs(span - 90_000) <= 3_000,
+    `Auction — endsAtMs reflects the STORED duration override 90s, not 600 (span=${span}ms)`)
+
+  // Slice 5: the CLOCK closes the auction — there is NO instructor close control.
+  const closeButtons = await dash.locator('[data-testid^="close-auction-"]').count()
+  assert(closeButtons === 0, `Auction — NO instructor "Close Auction" control exists on the dashboard (found ${closeButtons})`)
 
   // Map the happy group's students by bidderIndex (expert = 1). uiBidderIndexOf drives
   // "the student holding index k" — its page shows k's private view.
@@ -715,8 +749,8 @@ async function main() {
   const clock1 = await B1.page.locator('[data-testid="auction-clock"]').innerText()
   const toSecs = t => { const [m, s] = t.split(':').map(Number); return m * 60 + s }
   const s0 = toSecs(clock0), s1 = toSecs(clock1)
-  assert(Number.isFinite(s0) && Number.isFinite(s1) && s1 < s0 && s0 >= 1 && s0 <= 60,
-    `Auction UI — clock counts DOWN from the 60s server deadline (${clock0} → ${clock1})`)
+  assert(Number.isFinite(s0) && Number.isFinite(s1) && s1 < s0 && s0 >= 1 && s0 <= 90,
+    `Auction UI — clock counts DOWN from the 90s server deadline (${clock0} → ${clock1})`)
 
   // ── Private-info panel per role + the CROWN JEWEL: no non-expert ever sees 2650 ──
   banner('Live auction UI — private-info panel per role; NO non-expert sees the expert value (2650)')
@@ -724,10 +758,11 @@ async function main() {
   assert(/expert/i.test(expertBody) && expertBody.includes('$2,650') && /exactly/i.test(expertBody),
     `Auction UI — the EXPERT (bidder 1) sees "$2,650 … exactly" in their private info`)
 
-  // Each non-expert sees their OWN signal + the ±1000 statement + their own use value,
-  // and their DOM contains NO "2650" in any form. (Skip index 5, whose OWN signal is
-  // legitimately 2650 — the leak we guard against is the EXPERT's exact value reaching
-  // someone whose own signal is not 2650.)
+  // SCOPED TO THE PRE-CLOSE BIDDING SCREEN (Slice 5 note): a non-expert may legitimately
+  // see 2650 ONLY after close, on the reveal. Here, on the live bidding screen, each
+  // non-expert sees their OWN signal + the ±1000 statement + their own use value, and NO
+  // "2650" in any form. (Skip index 5, whose OWN signal is legitimately 2650 — the leak we
+  // guard against is the EXPERT's exact value reaching someone whose own signal is not 2650.)
   let noLeak = true, leakWho = ''
   for (const idx of [2, 3, 4]) {
     const m = happyByIdx[idx]; if (!m) continue
@@ -736,7 +771,7 @@ async function main() {
     const clean = !t.includes('2650') && !t.includes('2,650')
     if (!ownOk || !clean) { noLeak = false; leakWho = `bidder ${idx} (ownOk=${ownOk}, clean=${clean})` }
   }
-  assert(noLeak, `Auction UI — every non-expert sees their OWN signal + ±$1,000 + own use value, and NEVER 2650 ${leakWho}`)
+  assert(noLeak, `Auction UI (PRE-CLOSE) — every non-expert sees their OWN signal + ±$1,000 + own use value, and NEVER 2650 before close ${leakWho}`)
 
   // ── Status line + one-row-per-bid history + no losing max + personal messages ──
   banner('Live auction UI — sequential bids: status flips, history rows, no-leak (109/110), messages')
@@ -820,98 +855,140 @@ async function main() {
   assert(leaked.length === 0,
     `Auction — NO confidential max appears anywhere under auctions/${happyGid} (leaked: [${leaked.join(',')}])`)
 
-  // Close the happy auction via the real button → students fall back to normal routing.
-  await dash.locator(`[data-testid="close-auction-${happyGid}"]`).click()
-  const aClosed = await pollAuction(happyGid, a => a?.status === 'closed', 10_000)
-  assert(aClosed?.status === 'closed', `Auction — Close button closes the auction (status=${aClosed?.status})`)
+  // NO close button — the DETAIL group's auction stays OPEN and the CLOCK will close +
+  // resolve it (checked near the end, by which time its 60s deadline has passed).
 
-  // ── Guard: an auction cannot start while any member is un-endowed (server, via the
-  // Start button). Null one noDeal member's endowment, click Start, assert rejection. ──
-  banner('Live auction — startAuction guard (no start before endowments land)')
-  const guardPid = noDealMembers[0].pid
+  // ══════════════════ SLICE 5 — CLOSE ON DEADLINE → RESOLVE → FULL REVEAL ══════════════════
+
+  // ── CONFORMANCE case 3, END TO END through the real UI (THE key Part-3 assertion) ──
+  // Real UI bids 2000 / 2100 / 2900 / 3300 → Bidder 4 wins at $2,901, profit −$151.
+  banner('Slice 5 — CONFORMANCE case 3 end-to-end: real UI bids → deadline → resolve → results')
+  const confGid = deadlockGid
+  const confMembers = membersOf(confGid)
+  const confByIdx = {}
+  for (const m of confMembers) confByIdx[byPid[m.pid]?.bidderIndex] = m
+  const C1 = confByIdx[1], C2 = confByIdx[2], C3 = confByIdx[3], C4 = confByIdx[4]
+  assert(C1 && C2 && C3 && C4, `Conformance — group has bidders 1..4 to drive (got [${Object.keys(confByIdx).sort().join(',')}])`)
+
+  await saveAuctionSettings(dash, 25, 1)                       // 25s: room to place 4 UI bids, then expire
+  await dash.goto(dashboardUrl())
+  await dash.waitForSelector(`[data-testid="start-auction-${confGid}"]`, { timeout: 30_000 })
+  await dash.locator(`[data-testid="start-auction-${confGid}"]`).click()
+  await pollAuction(confGid, a => a?.status === 'open', 15_000)
+  await Promise.all(confMembers.map(m => waitAuctionScreen(m.page)))
+
+  // Sequential bids (each registers before the next → all four maxes are stored).
+  await uiBid(C1.page, 2000); await pollAuction(confGid, a => a?.highBidderIndex === 1, 10_000)
+  await uiBid(C2.page, 2100); await pollAuction(confGid, a => a?.currentAmount === 2001, 10_000)
+  await uiBid(C3.page, 2900); await pollAuction(confGid, a => a?.currentAmount === 2101, 10_000)
+  await uiBid(C4.page, 3300); await pollAuction(confGid, a => a?.currentAmount === 2901 && a?.highBidderIndex === 4, 10_000)
+
+  // Let the CLOCK expire — nobody clicks close. Every student lands on the reveal.
+  banner('Conformance — clock expires → deadline close → all students land on results')
+  const confReached = await Promise.all(confMembers.map(m => waitResults(m.page, 40_000).then(() => true).catch(() => false)))
+  assert(confReached.every(Boolean), `Conformance — all ${confMembers.length} students land on the results screen via the DEADLINE close (real UI)`)
+
+  // THE assertion: winner Bidder 4, clearing $2,901, winner profit −$151.
+  const cWinner = await dataAttr(C4.page, 'results-headline', 'data-winner')
+  const cClear  = await dataAttr(C4.page, 'results-headline', 'data-clearing')
+  const cProfit = await dataAttr(C4.page, 'results-my-profit', 'data-profit')
+  assert(cWinner === '4' && cClear === '2901' && cProfit === '-151',
+    `Conformance E2E (real UI → callable → RTDB → proxy → resolver → results): winner Bidder ${cWinner}, clearing $${cClear}, winner profit ${cProfit} (expect 4 / 2901 / −151)`)
+  // The NEGATIVE profit is rendered unmistakably (a real minus sign) on the winner's screen.
+  assert((await bodyText(C4.page)).includes('−$151'),
+    `Conformance — the winner's NEGATIVE profit −$151 is shown unmistakably (the winner's curse lands)`)
+
+  // The REVEAL: every student now sees the true value 2650 (the FIRST legit 2650 for non-experts).
+  const revealOk = await Promise.all(confMembers.map(async m => (await dataAttr(m.page, 'results-reveal', 'data-true-value')) === '2650'))
+  assert(revealOk.every(Boolean), `Conformance — the REVEAL shows the true resale value $2,650 on EVERY student's results screen`)
+
+  // ALL maxes visible in the reveal table.
+  const cRows = await readResultRows(C1.page)
+  const maxOf = i => cRows.find(r => r.bidder === i)?.max
+  assert(maxOf(1) === '2000' && maxOf(2) === '2100' && maxOf(3) === '2900' && maxOf(4) === '3300',
+    `Conformance — ALL maxes visible at close: [${cRows.map(r => `${r.bidder}:${r.max}`).join(' ')}]`)
+
+  // ── IDEMPOTENCY: repeat/concurrent close triggers → exactly ONE resolution ──
+  banner('Slice 5 — idempotency: concurrent close triggers → one resolution, one winner, one price')
+  const stored1 = await pollStoredResult(C1.pid)
+  await Promise.all([checkCloseFn(C1.pid, confGid), checkCloseFn(C2.pid, confGid)])
+  const stored2 = await readStoredResult(C1.pid)
+  assert(stored1 && stored2 && stored1.resolvedAtMs === stored2.resolvedAtMs && stored2.winner === 4 && stored2.clearing === 2901,
+    `Idempotency — repeat close triggers do NOT re-resolve: one resolvedAt (${stored1?.resolvedAtMs}===${stored2?.resolvedAtMs}), one winner (4), one price (2901)`)
+
+  // ── ADVERSARIAL / SECURITY (5d): a post-deadline submitBid, BYPASSING THE UI, is
+  // server-REJECTED and never enters the resolution. Do NOT convert this to a UI click —
+  // a sniper with a browser console does not use the button; this proves the SERVER guard. ──
+  banner('Slice 5 — ADVERSARIAL sniping: a direct post-deadline submitBid is server-REJECTED')
+  const nodeBefore = await readAuction(confGid)
+  const snipe = await submitBidFn(C2.pid, confGid, 99999)     // legit member, huge max, AFTER the deadline
+  assert(!snipe.ok, `ADVERSARIAL — the SERVER rejects a direct post-deadline bid (status=${snipe.status})`)
+  const nodeAfter = await readAuction(confGid)
+  assert(nodeAfter?.currentAmount === nodeBefore?.currentAmount && nodeAfter?.highBidderIndex === nodeBefore?.highBidderIndex,
+    `ADVERSARIAL — the rejected late bid did NOT alter currentAmount/highBidderIndex (${nodeAfter?.currentAmount}/${nodeAfter?.highBidderIndex})`)
+  const storedAdv = await readStoredResult(C1.pid)
+  assert(storedAdv?.winner === 4 && storedAdv?.clearing === 2901 && storedAdv?.perBidder.find(b => b.bidderIndex === 2)?.maxAmount === 2100,
+    `ADVERSARIAL — the late bid does NOT enter the resolution (winner 4, price 2901, bidder 2 max still 2100, not 99999)`)
+
+  // ── NO-SALE + "NOBODY WATCHING": the deadline passes with no active client, then a
+  // student loads the page and STILL sees results (not a dead clock). ──
+  banner('Slice 5 — NO-SALE + nobody-watching: deadline passes unobserved → late load → resolve → results')
+  const nsGid = noDealGid
+  const nsMembers = membersOf(nsGid)
+
+  // Guard (kept): an auction cannot start while a member is un-endowed. Null one, assert
+  // Start is rejected, restore verbatim — BEFORE opening the no-sale auction.
+  const guardPid = nsMembers[0].pid
   const guardRaw = (await fsGetDoc(`participants/${guardPid}`))?.fields?.auction_endowment ?? null
   await patchEndowment(guardPid, null)
-  const guardRes = await startAuctionFn(noDealGid)
+  const guardRes = await startAuctionFn(nsGid)
   assert(!guardRes.ok, `Auction guard — startAuction REJECTED while a member lacks an endowment (status=${guardRes.status})`)
-  assert((await readAuction(noDealGid)) == null, `Auction guard — no auction node created for the un-ready group`)
-  await patchEndowment(guardPid, guardRaw)   // restore verbatim
+  assert((await readAuction(nsGid)) == null, `Auction guard — no auction node created for the un-ready group`)
+  await patchEndowment(guardPid, guardRaw)
 
-  // ── SNIPING through the UI: the SERVER clock owns the deadline. When it hits zero the
-  // client (computed from the server's endsAtMs + offset) stops the clock, disables
-  // bidding, and shows "Auction closed" — the student cannot snipe. ──
-  banner('Live auction UI — SNIPING: at the server deadline the bid controls vanish, no late bid')
-  await saveAuctionSettings(dash, 6, 1)                       // 6-second auction (long enough to render while open)
-  await dash.goto(dashboardUrl())                            // restore the dashboard page off /settings
-  await dash.waitForSelector(`[data-testid="start-auction-${deadlockGid}"]`, { timeout: 30_000 })
-  await dash.locator(`[data-testid="start-auction-${deadlockGid}"]`).click()
-  const snipe0 = await pollAuction(deadlockGid, a => a?.status === 'open', 15_000)
-  assert(snipe0?.status === 'open', `Auction sniping — short 6s auction opened (endsAtMs ${snipe0?.endsAtMs})`)
-  const snipeStu = deadlockMembers[0]
-  await waitAuctionScreen(snipeStu.page)
-  // While open, the student CAN bid (control present).
-  const openHasInput = await snipeStu.page.locator('[data-testid="auction-place-bid"]').count()
-  assert(openHasInput === 1, `Auction sniping — while OPEN the Place-bid control is present`)
-  // Let the SERVER deadline pass; the client clock (server-offset) hits zero on its own.
-  await snipeStu.page.waitForSelector('[data-testid="auction-closed"]', { timeout: 12_000 })
-  const clockZero = await snipeStu.page.locator('[data-testid="auction-clock"]').innerText()
-  const noBidControl = await snipeStu.page.locator('[data-testid="auction-place-bid"]').count()
-  assert(clockZero === '0:00' && noBidControl === 0,
-    `Auction SNIPING (UI) — at the deadline the clock stops at 0:00 and the bid control is GONE — no late bid possible (clock=${clockZero}, controls=${noBidControl})`)
-  // Close server-side so the deadlock group returns to normal routing for its outcome flow.
-  await dash.locator(`[data-testid="close-auction-${deadlockGid}"]`).click()
-  await pollAuction(deadlockGid, a => a?.status === 'closed', 10_000)
+  await saveAuctionSettings(dash, 10, 1)                       // 10s auction, nobody will bid
+  await dash.goto(dashboardUrl())
+  await dash.waitForSelector(`[data-testid="start-auction-${nsGid}"]`, { timeout: 30_000 })
+  await dash.locator(`[data-testid="start-auction-${nsGid}"]`).click()
+  await pollAuction(nsGid, a => a?.status === 'open', 15_000)
+  await Promise.all(nsMembers.map(m => waitAuctionScreen(m.page).catch(() => {})))
 
-  // ── (6) Happy group: a `price` deal, accepted + persisted ──────────────────
-  banner(`Outcome — happy group: price ${HAPPY_PRICE} deal`)
-  await startGroupToReport(happyMembers)
-  await reportPriceDeal(happyMembers, HAPPY_PRICE)
-  const gHappy = (await pollGroups(gs => gs.find(x => x.id === happyGid)?.status === 'completed', 30_000))
-    .find(x => x.id === happyGid)
-  assert(gHappy?.status === 'completed' && gHappy?.agreement === true && gHappy?.price === HAPPY_PRICE,
-    `Outcome — placeholder price deal accepted + persisted (status=${gHappy?.status}, price=${gHappy?.price})`)
+  // Nobody bids. Navigate EVERY member's page AWAY so NO client observes the deadline.
+  await Promise.all(nsMembers.map(m => m.page.goto('about:blank').catch(() => {})))
+  await sleep(11_000)   // the SERVER deadline passes while the node is still 'open', unobserved
+  assert((await readAuction(nsGid))?.status === 'open' && (await readStoredResult(nsMembers[0].pid)) == null,
+    `Nobody-watching — the deadline passed but NOTHING resolved it (no scheduled fn, no observer)`)
 
-  // ── (7) Deadlock group: 5 rejects → deadlocked → dashboard override { price } ──
-  banner(`Deadlock — 5 rejects → deadlocked → dashboard override price ${DEADLOCK_PRICE}`)
-  await startGroupToReport(deadlockMembers)
-  for (let i = 1; i <= 5; i++) {
-    await rejectCycle(deadlockMembers, 100 + i)  // distinct price each cycle (immaterial; group never agrees)
-    log(deadlockGid, `reject cycle ${i}/5`)
-    if (i < 5) await pollGroups(gs => (gs.find(x => x.id === deadlockGid)?.status) === 'reporting', 15_000)
-  }
-  const gDead = (await pollGroups(gs => gs.find(x => x.id === deadlockGid)?.status === 'deadlocked', 30_000))
-    .find(x => x.id === deadlockGid)
-  assert(gDead?.status === 'deadlocked',
-    `Deadlock — 5 rejects drive the group to 'deadlocked' (status=${gDead?.status})`)
-  // Students see the instructor-intervention screen (real UI state).
-  const anyIntervention = await deadlockMembers[0].page.waitForSelector('h1:has-text("Instructor intervention needed")', { timeout: 15_000 })
-    .then(() => true).catch(() => false)
-  assert(anyIntervention, `Deadlock — the group's students see "Instructor intervention needed"`)
+  // A student loads the page LATE → the client observes the passed deadline → resolves.
+  const ns0 = nsMembers[0]
+  await ns0.page.goto(studentUrl(ns0.pid))
+  await waitResults(ns0.page, 40_000)
+  const nsWinner = await dataAttr(ns0.page, 'results-headline', 'data-winner')
+  const nsReveal = await dataAttr(ns0.page, 'results-reveal', 'data-true-value')
+  const nsBody = await bodyText(ns0.page)
+  assert(nsWinner === '' && nsReveal === '2650' && !/NaN|Bidder null|undefined/.test(nsBody),
+    `Nobody-watching / NO-SALE — a LATE page load resolves + renders the no-sale reveal gracefully (winner=∅, true value 2650, no NaN/"Bidder null")`)
 
-  // Drive the REAL dashboard deadlock-override control: fill "Final price ($)" + Lock Deal.
-  await dash.reload()
-  await dash.waitForSelector('h2:has-text("Needs Resolution")', { timeout: 30_000 })
-  await dash.locator('input[type="number"]').first().fill(String(DEADLOCK_PRICE))
-  await dash.click('button:has-text("Lock Deal")')
-  const gResolved = (await pollGroups(gs => gs.find(x => x.id === deadlockGid)?.status === 'completed', 20_000))
-    .find(x => x.id === deadlockGid)
-  // If the control had submitted { placeholder } (the latent Hawks bug), submitInstructorOutcome
-  // would REJECT it against the schema → the group would NOT complete + no price would persist.
-  assert(gResolved?.status === 'completed' && gResolved?.price === DEADLOCK_PRICE,
-    `Deadlock override — control submits { price } (NOT { placeholder }): group completes with price=${gResolved?.price}`)
+  // ── DETAIL group: the CLOCK closes+resolves it too. Wait out its (longer) deadline,
+  // then confirm resolution. (Deadline-close via the client is already proven by the
+  // conformance group; here we just wait out the 90s clock and belt-and-suspenders the
+  // trigger against headless background-timer throttling.) ──
+  banner('Slice 5 — the DETAIL group closes + resolves on its deadline too')
+  const detailEnds = aHappy.endsAtMs
+  while (Date.now() <= detailEnds + 1000) await sleep(1000)   // wait out the 90s deadline
+  await checkCloseFn(B1.pid, happyGid).catch(() => {})        // ensure resolution past the deadline
+  const detailStored = await pollStoredResult(B1.pid, 30_000)
+  await waitResults(B1.page, 30_000)
+  const dReveal = await dataAttr(B1.page, 'results-reveal', 'data-true-value')
+  assert(detailStored && detailStored.winner === 4 && detailStored.clearing === 3001 && dReveal === '2650',
+    `DETAIL — resolved on the clock: winner ${detailStored?.winner}, clearing ${detailStored?.clearing} (concurrency maxes), reveal ${dReveal} (expect 4 / 3001 / 2650)`)
 
-  // ── No-deal group: present students who walk away (the "present but no bid" case) ──
-  banner('Outcome — no-deal group: lead reports NO DEAL, all confirm (present, zero outcome)')
-  await startGroupToReport(noDealMembers)
-  await reportNoDeal(noDealMembers)
-  const gNoDeal = (await pollGroups(gs => gs.find(x => x.id === noDealGid)?.status === 'completed', 30_000))
-    .find(x => x.id === noDealGid)
-  assert(gNoDeal?.status === 'completed' && gNoDeal?.agreement === false,
-    `Outcome — no-deal walk-away persisted (status=${gNoDeal?.status}, agreement=${gNoDeal?.agreement})`)
-
-  // ── (8) Score & Record (dashboard UI) → stub scoring → grade push (POST + 200) ──
-  banner('Finalize — Score & Record → stub scoring → grade push (POST + 200)')
+  // ── (8) Score & Record (dashboard UI) → scoring over AUCTION outcomes → grade push ──
+  // Grading is UNCHANGED (Slice 6 wires the real participation/KC grade): the stub still
+  // echoes group.outcome.price, which the auction resolution now supplies (clearing price;
+  // no-sale → walk-away). The finalize/push wiring is what this proves.
+  banner('Finalize — Score & Record → scoring over auction outcomes → grade push (POST + 200)')
   await dash.click('button:has-text("Score & Record")')
-  // The push is async; wait for the mock to receive one GameResult per participant.
   const isResult = r => r.result && typeof r.result === 'object' && typeof r.result.participant_id === 'string'
   const start = Date.now()
   while (mock.received.filter(isResult).length < PIDS.length && Date.now() - start < 30_000) await sleep(500)
@@ -924,25 +1001,25 @@ async function main() {
   assert(pushed.length > 0 && pushed.every(r => typeof r.auth === 'string' && r.auth.startsWith('Bearer ')),
     `Grade push — every push is authenticated with the callback Bearer secret`)
 
-  // Stub scoring wrote raw_score = the group's price (single role → one z-score pool).
+  // The auction resolution supplied group.outcome: clearing price (winner group) / no-deal
+  // (no-sale group). The stub echoes it as raw_score, giving the z-score pool real variance.
   const partsFinal = await readParticipants()
-  const happyRaws = partsFinal.filter(p => p.group_id === happyGid).map(p => p.raw_score)
-  const deadRaws  = partsFinal.filter(p => p.group_id === deadlockGid).map(p => p.raw_score)
-  const noDealParts = partsFinal.filter(p => p.group_id === noDealGid)
-  assert(happyRaws.length === happyMembers.length && happyRaws.every(s => s === HAPPY_PRICE),
-    `Scoring — stub echoes price: happy group (${happyMembers.length}) raw_score all === ${HAPPY_PRICE}`)
-  assert(deadRaws.length === deadlockMembers.length && deadRaws.every(s => s === DEADLOCK_PRICE),
-    `Scoring — stub echoes price: deadlock group (${deadlockMembers.length}) raw_score all === ${DEADLOCK_PRICE}`)
+  const confRaws   = partsFinal.filter(p => p.group_id === confGid).map(p => p.raw_score)
+  const detailRaws = partsFinal.filter(p => p.group_id === happyGid).map(p => p.raw_score)
+  const nsParts    = partsFinal.filter(p => p.group_id === nsGid)
+  assert(confRaws.length === confMembers.length && confRaws.every(s => s === 2901),
+    `Scoring — conformance group raw_score all === 2901 (auction clearing price echoed) [${confRaws.join(',')}]`)
+  assert(detailRaws.length === happyMembers.length && detailRaws.every(s => s === 3001),
+    `Scoring — detail group raw_score all === 3001 (auction clearing price echoed) [${detailRaws.join(',')}]`)
   assert(partsFinal.every(p => typeof p.normalized_score === 'number'),
     `Scoring — every participant has a normalized (z) score`)
 
-  // GRADING TRAP: a student who attended and reached the auction but placed NO bid
-  // (the no-deal, zero-outcome group) is PRESENT, not a no-show. They score the
-  // present-student floor (raw 0), NEVER the no-show −2.
-  assert(noDealParts.length === noDealMembers.length && noDealParts.every(p => p.raw_score === 0),
-    `Scoring — no-bid present students score raw 0 (walk-away), not treated as absent (${noDealParts.map(p => p.raw_score).join(',')})`)
-  assert(noDealParts.every(p => typeof p.normalized_score === 'number' && p.normalized_score !== -2),
-    `Scoring — no-bid present students get a present z-score, NOT the no-show −2 (${noDealParts.map(p => p.normalized_score).join(',')})`)
+  // GRADING TRAP: no-sale students attended + reached the auction but placed NO bid —
+  // they are PRESENT (walk-away raw 0), NEVER the no-show −2.
+  assert(nsParts.length === nsMembers.length && nsParts.every(p => p.raw_score === 0),
+    `Scoring — no-bid present students score raw 0 (walk-away), not treated as absent [${nsParts.map(p => p.raw_score).join(',')}]`)
+  assert(nsParts.every(p => typeof p.normalized_score === 'number' && p.normalized_score !== -2),
+    `Scoring — no-bid present students get a present z-score, NOT the no-show −2 [${nsParts.map(p => p.normalized_score).join(',')}]`)
 }
 
 // ── Entry point ─────────────────────────────────────────────────────────────────

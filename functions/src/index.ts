@@ -64,7 +64,7 @@ export { scoreAndRecord } from './scoreAndRecord'
 export { assignEndowments } from './assignEndowments'
 
 // ── Part 3 Slice 3: live auction server (RTDB state + bid callable) ──
-export { startAuction, submitBid, closeAuction } from './liveAuction'
+export { startAuction, submitBid, closeAuction, checkAuctionClose } from './liveAuction'
 
 // ── Non-game onRequest endpoints ──────────────────────────────────────────────
 

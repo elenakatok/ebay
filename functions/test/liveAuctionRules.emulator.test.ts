@@ -19,6 +19,7 @@ const IID = 'inst1'
 const GID = 'grpA'
 const OTHER_GID = 'grpB'
 const STUDENT = 'student-1'
+const REVEAL_MEMBER = 'reveal-m1'   // distinct doc for the Slice-5 reveal tests (shared project)
 
 const fsHost = (process.env.FIRESTORE_EMULATOR_HOST ?? '127.0.0.1:8082').split(':')
 const dbHost = (process.env.FIREBASE_DATABASE_EMULATOR_HOST ?? '127.0.0.1:9002').split(':')
@@ -43,6 +44,14 @@ beforeAll(async () => {
     // A confidential proxy max + the group's truth (both server-only).
     await fs.doc(`game_instances/${IID}/groups/${GID}/bids/1`).set({ bidderIndex: 1, maxAmount: 9999, serverTimestampMs: 1 })
     await fs.doc(`game_instances/${IID}/groups/${GID}/truth/auction`).set({ vCommon: 2650 })
+    // Slice 5: the full reveal lands on each member's OWN participant doc at resolution
+    // (member-only read), copied from bids/ + truth/ — which stay denied forever.
+    // Distinct participant ids (this project/instance is SHARED with vCommonDenied's
+    // suite, which owns `student-1` — do not clobber it).
+    await fs.doc(`game_instances/${IID}/participants/${REVEAL_MEMBER}`).set({
+      group_id: GID,
+      auction_result: { winnerBidderIndex: 4, clearingPrice: 2901, vCommon: 2650, perBidder: [], resolvedAtMs: 1 },
+    })
 
     const db = ctx.database()
     // Public auction node for the student's group + another group; membership index.
@@ -93,5 +102,32 @@ describe('RTDB — auctions/** is server-write-only + own-group-read-only', () =
     const db = testEnv.authenticatedContext(STUDENT).database()
     await assertFails(db.ref(`auctionMembers/${IID}/${STUDENT}`).get())
     await assertFails(db.ref(`auctionMembers/${IID}/${STUDENT}`).set(OTHER_GID))
+  })
+})
+
+describe('Slice 5 — the reveal is readable WITHOUT relaxing bids/ or truth/', () => {
+  it('a member CAN read their OWN auction_result after resolution', async () => {
+    const fs = testEnv.authenticatedContext(REVEAL_MEMBER).firestore()
+    const snap = await assertSucceeds(fs.doc(`game_instances/${IID}/participants/${REVEAL_MEMBER}`).get())
+    expect(snap.data()!.auction_result.vCommon).toBe(2650)
+    expect(snap.data()!.auction_result.clearingPrice).toBe(2901)
+  })
+  it('DENIES another student reading someone else\'s reveal (own-doc only)', async () => {
+    const fs = testEnv.authenticatedContext('reveal-outsider').firestore()
+    await assertFails(fs.doc(`game_instances/${IID}/participants/${REVEAL_MEMBER}`).get())
+  })
+  it('bids/ (confidential max) STILL denied AFTER resolution — reveal came from the copy', async () => {
+    const fs = testEnv.authenticatedContext(STUDENT).firestore()
+    await assertFails(fs.doc(`game_instances/${IID}/groups/${GID}/bids/1`).get())
+  })
+  it('truth/auction (vCommon) STILL denied AFTER resolution — reveal came from the copy', async () => {
+    const fs = testEnv.authenticatedContext(STUDENT).firestore()
+    await assertFails(fs.doc(`game_instances/${IID}/groups/${GID}/truth/auction`).get())
+  })
+  it('a member CANNOT client-write auction_result onto their own doc (server-only field)', async () => {
+    const fs = testEnv.authenticatedContext(REVEAL_MEMBER).firestore()
+    await assertFails(fs.doc(`game_instances/${IID}/participants/${REVEAL_MEMBER}`).update({
+      auction_result: { winnerBidderIndex: 1, clearingPrice: 0, vCommon: 0, perBidder: [], resolvedAtMs: 2 },
+    }))
   })
 })

@@ -14,6 +14,7 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 
 import type { AuctionLabels } from './auction/AuctionBidding'
+import type { AuctionResult, AuctionResultsLabels } from './auction/AuctionResults'
 
 /** The student's own, client-readable endowment (participant doc `auction_endowment`). */
 export interface EbayEndowment {
@@ -73,6 +74,52 @@ export const ebayAuctionLabels: AuctionLabels = {
   msgOutbid: (leaderLabel, amount, lowerBound) =>
     `You were outbid. ${leaderLabel} is winning at ${money(amount)}. ` +
     `Their maximum is at least ${money(lowerBound)} — you don't know how much more.`,
+}
+
+// ── Full-reveal / debrief copy (Slice 5) ────────────────────────────────────────
+export const ebayAuctionResultsLabels: AuctionResultsLabels = {
+  title: 'Auction results',
+  headline: (winnerLabel, clearingPrice) =>
+    winnerLabel !== null && clearingPrice !== null
+      ? `${winnerLabel} won the auction at ${money(clearingPrice)}.`
+      : 'Nobody bought the horn — no sale.',
+  youWon: 'You won.',
+  youLost: 'You did not win.',
+  youDidNotBid: 'You did not place a bid.',
+  yourProfitLabel: 'Your profit:',
+  trueValueReveal: (vCommon) => <span>The true resale value was <strong>{money(vCommon)}</strong>.</span>,
+  tableCols: {
+    bidder: 'Bidder', estimate: 'Their estimate', useValue: 'Their use value',
+    maxBid: 'Their max bid', trueValue: 'True value to them', profit: 'Profit',
+  },
+  estimateCell: (signal, isExpert) => (isExpert ? `${money(signal)} (exact)` : money(signal)),
+  historyHeading: 'Bid history',
+  historyCols: { bidder: 'Bidder', bid: 'Bid', time: 'Time' },
+  summaryText: (result: AuctionResult) => {
+    if (result.winnerBidderIndex === null || result.clearingPrice === null) {
+      return <span>Nobody placed a bid, so the horn did not sell.</span>
+    }
+    const w = result.perBidder.find(b => b.bidderIndex === result.winnerBidderIndex)
+    if (!w) return null
+    const delta = w.signal - result.vCommon
+    const dir = delta >= 0 ? 'above' : 'below'
+    if (w.profit < 0) {
+      return (
+        <span>
+          The winner paid more than the horn was worth to them. Their estimate of the resale
+          value was <strong>{money(Math.abs(delta))} {dir}</strong> the truth — and the auction
+          made them pay for that optimism. <strong>This is the winner&apos;s curse.</strong>
+        </span>
+      )
+    }
+    const rel = delta === 0 ? <strong>exactly right</strong> : <><strong>{money(Math.abs(delta))} {dir}</strong> the truth</>
+    return (
+      <span>
+        The winner came out ahead: they paid {money(result.clearingPrice)} for something worth{' '}
+        {money(w.realizedValue)} to them. Their estimate was {rel}.
+      </span>
+    )
+  },
 }
 
 /** Render the always-visible private-info panel from the student's OWN endowment. */

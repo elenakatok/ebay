@@ -3,18 +3,20 @@ import { httpsCallable } from 'firebase/functions'
 import { InstructorDashboard as SharedDashboard, type DeadlockResolutionProps, type OutcomeFields } from '@mygames/game-ui'
 import { auth, functions, rtdb } from '../firebase'
 import { ebayConfig } from '../gameConfig'
-import { startAuction, closeAuction, getRoster } from '../api'
+import { startAuction, getRoster } from '../api'
 
 const roleLabels = Object.fromEntries(
   ebayConfig.roles.map(r => [r.key, r.label])
 )
 
-// ── Minimal live-auction controls (Slice 3) ──────────────────────────────────
-// Per-group Start / Close Auction buttons, rendered BELOW the shared dashboard
-// (the shared round-controls slot only renders for multi-round games; eBay is
-// single-round). Self-fetches the groups via getRoster once the instructor session
-// is established. Bare minimum to drive the auction — the student bidding UI + live
-// board arrive in Slice 4.
+// ── Minimal live-auction controls (Slice 3 → Slice 5) ────────────────────────
+// Per-group "Start Auction" button ONLY. Starting IS an instructor decision (when the
+// room is ready); CLOSING IS NOT — the CLOCK closes the auction at its pre-specified
+// time (spec §5; KC Q4 tells students exactly this), and an early instructor close
+// would both falsify that and break the sniping lesson. So there is no Close button;
+// resolution is deadline-driven (checkAuctionClose, observed by whoever next looks).
+// Rendered BELOW the shared dashboard (the round-controls slot only renders for
+// multi-round games; eBay is single-round). Self-fetches the groups via getRoster.
 
 function EbayAuctionControls() {
   const [groups, setGroups] = useState<{ group_id: string }[]>([])
@@ -54,11 +56,7 @@ function EbayAuctionControls() {
             disabled={busy[g.group_id]}
             onClick={() => run(g.group_id, () => startAuction(g.group_id), 'started')}
           >Start Auction</button>
-          <button
-            data-testid={`close-auction-${g.group_id}`}
-            disabled={busy[g.group_id]}
-            onClick={() => run(g.group_id, () => closeAuction(g.group_id), 'closed')}
-          >Close Auction</button>
+          <span style={{ fontSize: '0.8rem', color: '#888' }}>closes automatically at its deadline</span>
           {msg[g.group_id] && <span style={{ fontSize: '0.85rem', color: '#555' }}>{msg[g.group_id]}</span>}
         </div>
       ))}

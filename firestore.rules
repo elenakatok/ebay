@@ -18,7 +18,8 @@ service cloud.firestore {
                       'knowledge_check_score', 'knowledge_check_attempts',
                       'prep_status', 'prep_completed_at', 'debrief_initial_offer',
                       'finalized_at', 'attendance_confirmed_at', 'confirmed_ready_at',
-                      'is_lead', 'participant_id', 'game_instance_id', 'participant_late']);
+                      'is_lead', 'participant_id', 'game_instance_id', 'participant_late',
+                      'auction_endowment', 'auction_result']);
     }
 
     // role_counts is an internal balancing counter — backend only.

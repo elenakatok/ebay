@@ -79,6 +79,11 @@ export const submitBid = (args: CallArgs, groupId: string, maxAmount: number) =>
   callFn<{ ok: boolean; currentAmount: number; highBidderIndex: number | null }>(
     'submitBid', { ...args, group_id: groupId, max_amount: maxAmount })
 
+/** Student: observe the deadline → resolve + close (idempotent). Slice 5's close trigger. */
+export const checkAuctionClose = (args: CallArgs, groupId: string) =>
+  callFn<{ ok: boolean; resolved: boolean; alreadyResolved?: boolean; reason?: string }>(
+    'checkAuctionClose', { ...args, group_id: groupId })
+
 // ── Instructor API ────────────────────────────────────────────────────────────
 
 export type InstructorSessionArgs =
