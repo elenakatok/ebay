@@ -43,8 +43,9 @@ export interface AuctionResultsLabels {
   estimateCell: (signal: number, isExpert: boolean) => string
   historyHeading: string
   historyCols: { bidder: string; bid: string; time: string }
-  /** Plain-language debrief line (winner's curse / profit / no-sale). eBay copy. */
-  summaryText: (result: AuctionResult) => React.ReactNode
+  /** Plain-language debrief line (winner's curse / profit / no-sale). eBay copy.
+   *  `viewerIsWinner` selects second-person ("You paid…") vs third-person ("The winner paid…"). */
+  summaryText: (result: AuctionResult, viewerIsWinner: boolean) => React.ReactNode
 }
 
 const money = (n: number) => '$' + Math.round(n).toLocaleString('en-US')
@@ -148,7 +149,7 @@ export default function AuctionResults({ labels, result, myBidderIndex, bidderLa
 
       {/* 4 — Plain-language debrief line */}
       <div data-testid="results-summary" style={{ background: '#f6f8fa', border: '1px solid #d0d7de', borderRadius: 8, padding: '0.75rem 1rem', marginBottom: '1rem', lineHeight: 1.5 }}>
-        {labels.summaryText(result)}
+        {labels.summaryText(result, iWon)}
       </div>
 
       {/* 5 — Bid history (static; one row per submitted bid; never a losing max) */}

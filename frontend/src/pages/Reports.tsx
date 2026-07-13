@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { httpsCallable } from 'firebase/functions'
 import { signInWithCustomToken, signOut } from 'firebase/auth'
@@ -13,142 +13,139 @@ import {
   type ReportTileConfig,
   type AiTextRow,
 } from '@mygames/game-ui'
-import { SchemaField, parseForm, type FormValues } from '../phases/OutcomeReporting'
-import { type OutcomeSchema } from '../gameConfig'
+import PriceOverTimeSVG from '../components/PriceOverTimeSVG'
+import type { ReportData, GroupReport, StudentReportRow, MemberOutcome } from '../api'
 
-// ── Types ─────────────────────────────────────────────────────────────────────
+// ── Formatting ──────────────────────────────────────────────────────────────────
 
-type ReportRow = {
-  participant_id: string
-  display_name: string
-  group_number: number | null
-  group_id: string | null
-  role: string
-  // The auction clearing (sale) price for this member's group; null on a no-sale.
-  price: number | null
-  value_or_cost: number | null
-  raw_score: number | null
-  knowledge_check_score: number | null
-  text_answers: Record<string, string>
-  notes: string | null
-}
+const ROLE_LABELS: Record<string, string> = { bidder: 'Bidder' }
 
-type QuestionMeta = { field: string; prompt: string; role_target: string }
+const money = (n: number | null) => n == null ? '—' : '$' + Math.round(n).toLocaleString('en-US')
+const signedMoney = (n: number | null) =>
+  n == null ? '—' : (n < 0 ? '−$' + Math.abs(Math.round(n)).toLocaleString('en-US') : '$' + Math.round(n).toLocaleString('en-US'))
+const secs = (n: number | null) => n == null ? '—' : `${n}s`
+const fmtKc = (n: number | null) => n == null ? '—' : `${Math.round(n * 5)} / 5`
+const nameLabel = (name: string | null, label: string | null) => name && label ? `${name}: ${label}` : (name ?? label ?? '—')
 
-// ── Role labels — single role ─────────────────────────────────────────────────
+const OUTCOME_COLOR: Record<MemberOutcome, string> = { 'Won': '#137333', 'Lost': '#5f6368', 'No bid': '#8a6d00', '—': '#9aa0a6' }
 
-const ROLE_LABELS: Record<string, string> = {
-  bidder: 'Bidder',
-}
+// ── Report 1 — per-group summary ──────────────────────────────────────────────────
 
-function fmt(n: number | null): string {
-  return n == null ? '—' : n.toLocaleString('en-US')
-}
+type GroupSortKey = 'group' | 'highest' | 'price' | 'profit' | 'high_bidder' | 't_high' | 'second' | 't_second' | 'expert'
 
-function fmtSigned(n: number | null): string {
-  if (n == null) return '—'
-  return (n >= 0 ? '+' : '−') + Math.abs(n).toLocaleString('en-US')
-}
-
-// ── Sortable columns ──────────────────────────────────────────────────────────
-
-type SortKey = 'name' | 'group' | 'role' | 'price' | 'value_or_cost' | 'raw_score' | 'kc' | 'notes' | 'edit'
-
-// KC score is stored 0.0–1.0 over 5 graded statics; show it as "N / 5".
-function fmtKc(n: number | null): string {
-  return n == null ? '—' : `${Math.round(n * 5)} / 5`
-}
-
-const COLUMNS: readonly SortableColumn<ReportRow, SortKey>[] = [
-  {
-    key: 'name', label: 'Name', headerStyle: { minWidth: 140 }, sticky: 'left',
-    render: r => r.display_name,
-    compare: (a, b) => a.display_name.localeCompare(b.display_name),
-  },
-  {
-    key: 'group', label: 'Group #',
+const GROUP_COLUMNS: readonly SortableColumn<GroupReport, GroupSortKey>[] = [
+  { key: 'group', label: 'Group', sticky: 'left', headerStyle: { minWidth: 64 },
     render: r => r.group_number ?? '—',
-    compare: (a, b) => (a.group_number ?? Infinity) - (b.group_number ?? Infinity),
-  },
-  {
-    key: 'role', label: 'Role',
-    render: r => ROLE_LABELS[r.role] ?? r.role,
-    compare: (a, b) => a.role.localeCompare(b.role),
-  },
-  {
-    key: 'price', label: 'Price ($)', nullsLast: true, isNull: r => r.price === null,
-    tiebreak: (a, b) => a.display_name.localeCompare(b.display_name),
-    render: r => <span style={{ fontVariantNumeric: 'tabular-nums' }}>{fmt(r.price)}</span>,
-    compare: (a, b) => (a.price ?? 0) - (b.price ?? 0),
-  },
-  {
-    key: 'value_or_cost', label: 'Value / Cost', nullsLast: true, isNull: r => r.value_or_cost === null,
-    tiebreak: (a, b) => a.display_name.localeCompare(b.display_name),
-    render: r => <span style={{ fontVariantNumeric: 'tabular-nums' }}>{fmt(r.value_or_cost)}</span>,
-    compare: (a, b) => (a.value_or_cost ?? 0) - (b.value_or_cost ?? 0),
-  },
-  {
-    key: 'raw_score', label: 'Raw score', nullsLast: true, isNull: r => r.raw_score === null,
-    tiebreak: (a, b) => a.display_name.localeCompare(b.display_name),
-    render: r => <span style={{ fontVariantNumeric: 'tabular-nums' }}>{fmtSigned(r.raw_score)}</span>,
-    compare: (a, b) => (a.raw_score ?? 0) - (b.raw_score ?? 0),
-  },
-  {
-    key: 'kc', label: 'KC score', nullsLast: true, isNull: r => r.knowledge_check_score === null,
-    tiebreak: (a, b) => a.display_name.localeCompare(b.display_name),
-    render: r => <span data-testid="report-kc" style={{ fontVariantNumeric: 'tabular-nums' }}>{fmtKc(r.knowledge_check_score)}</span>,
-    compare: (a, b) => (a.knowledge_check_score ?? 0) - (b.knowledge_check_score ?? 0),
-  },
-  {
-    key: 'notes', label: 'Notes', headerStyle: { minWidth: 80 },
-    nullsLast: true, isNull: r => !r.notes || !r.notes.trim(),
-    tiebreak: (a, b) => a.display_name.localeCompare(b.display_name),
-    render: r => (r.notes && r.notes.trim())
-      ? <span style={{ whiteSpace: 'pre-wrap', display: 'inline-block', maxWidth: 220, overflowWrap: 'anywhere' }}>{r.notes}</span>
-      : '—',
-    compare: (a, b) => (a.notes ?? '').localeCompare(b.notes ?? ''),
-  },
+    compare: (a, b) => (a.group_number ?? Infinity) - (b.group_number ?? Infinity) },
+  { key: 'highest', label: 'Highest Bid', nullsLast: true, isNull: r => r.highest_bid == null,
+    render: r => <span style={{ fontVariantNumeric: 'tabular-nums' }}>{money(r.highest_bid)}</span>,
+    compare: (a, b) => (a.highest_bid ?? 0) - (b.highest_bid ?? 0) },
+  { key: 'price', label: 'Auction Price', nullsLast: true, isNull: r => r.no_sale,
+    render: r => r.no_sale ? <span style={{ color: '#8a6d00' }}>No sale</span> : <span style={{ fontVariantNumeric: 'tabular-nums' }}>{money(r.auction_price)}</span>,
+    compare: (a, b) => (a.auction_price ?? 0) - (b.auction_price ?? 0) },
+  { key: 'profit', label: 'Winner Profit', nullsLast: true, isNull: r => r.winner_profit == null,
+    render: r => r.winner_profit == null ? '—'
+      : <span style={{ fontVariantNumeric: 'tabular-nums', color: r.winner_profit < 0 ? '#c5221f' : '#137333', fontWeight: r.winner_profit < 0 ? 700 : 400 }}>{signedMoney(r.winner_profit)}</span>,
+    compare: (a, b) => (a.winner_profit ?? 0) - (b.winner_profit ?? 0) },
+  { key: 'high_bidder', label: 'High Bidder',
+    render: r => nameLabel(r.high_bidder_name, r.high_bidder_label),
+    compare: (a, b) => (a.high_bidder_name ?? '').localeCompare(b.high_bidder_name ?? '') },
+  { key: 't_high', label: 'Time: Highest', nullsLast: true, isNull: r => r.time_highest_sec == null,
+    render: r => <span style={{ fontVariantNumeric: 'tabular-nums' }}>{secs(r.time_highest_sec)}</span>,
+    compare: (a, b) => (a.time_highest_sec ?? 0) - (b.time_highest_sec ?? 0) },
+  { key: 'second', label: 'Second Bidder',
+    render: r => nameLabel(r.second_bidder_name, r.second_bidder_label),
+    compare: (a, b) => (a.second_bidder_name ?? '').localeCompare(b.second_bidder_name ?? '') },
+  { key: 't_second', label: 'Time: Second', nullsLast: true, isNull: r => r.time_second_sec == null,
+    render: r => <span style={{ fontVariantNumeric: 'tabular-nums' }}>{secs(r.time_second_sec)}</span>,
+    compare: (a, b) => (a.time_second_sec ?? 0) - (b.time_second_sec ?? 0) },
+  { key: 'expert', label: 'Expert Name',
+    render: r => r.expert_name ?? '—',
+    compare: (a, b) => (a.expert_name ?? '').localeCompare(b.expert_name ?? '') },
 ]
 
-// ── Page component ────────────────────────────────────────────────────────────
+// ── Report 3 — per-student (PROFIT is a game outcome, NEVER a grade) ───────────────
+
+type StudentSortKey = 'name' | 'group' | 'role' | 'bidder' | 'outcome' | 'profit' | 'participation' | 'kc'
+
+const STUDENT_COLUMNS: readonly SortableColumn<StudentReportRow, StudentSortKey>[] = [
+  { key: 'name', label: 'Name', sticky: 'left', headerStyle: { minWidth: 140 },
+    render: r => r.display_name, compare: (a, b) => a.display_name.localeCompare(b.display_name) },
+  { key: 'group', label: 'Group #',
+    render: r => r.group_number ?? '—', compare: (a, b) => (a.group_number ?? Infinity) - (b.group_number ?? Infinity) },
+  { key: 'role', label: 'Role',
+    render: r => ROLE_LABELS[r.role] ?? r.role, compare: (a, b) => a.role.localeCompare(b.role) },
+  { key: 'bidder', label: 'Bidder',
+    render: r => r.bidder_label ?? '—', compare: (a, b) => (a.bidder_label ?? '').localeCompare(b.bidder_label ?? '') },
+  // ── GAME outcome (not a grade) ──
+  { key: 'outcome', label: 'Outcome', headerStyle: { minWidth: 72 },
+    render: r => r.outcome_label
+      ? <span style={{ color: OUTCOME_COLOR[r.outcome_label], fontWeight: 600 }}>{r.outcome_label}</span> : '—',
+    compare: (a, b) => (a.outcome_label ?? '').localeCompare(b.outcome_label ?? '') },
+  { key: 'profit', label: 'Profit ($) — game outcome, not a grade', nullsLast: true, isNull: r => r.profit == null,
+    render: r => r.profit == null ? '—'
+      : <span data-testid="report-profit" style={{ fontVariantNumeric: 'tabular-nums', color: r.profit < 0 ? '#c5221f' : '#137333', fontWeight: r.profit < 0 ? 700 : 400 }}>{signedMoney(r.profit)}</span>,
+    compare: (a, b) => (a.profit ?? 0) - (b.profit ?? 0) },
+  // ── GRADE ──
+  { key: 'participation', label: 'Participation (grade)', nullsLast: true, isNull: r => r.participation == null,
+    render: r => r.participation == null ? '—' : <span data-testid="report-participation" style={{ fontVariantNumeric: 'tabular-nums' }}>{r.participation}</span>,
+    compare: (a, b) => (a.participation ?? 0) - (b.participation ?? 0) },
+  { key: 'kc', label: 'KC score (grade)', nullsLast: true, isNull: r => r.knowledge_check_score == null,
+    render: r => <span data-testid="report-kc" style={{ fontVariantNumeric: 'tabular-nums' }}>{fmtKc(r.knowledge_check_score)}</span>,
+    compare: (a, b) => (a.knowledge_check_score ?? 0) - (b.knowledge_check_score ?? 0) },
+]
+
+// ── Modal shell ───────────────────────────────────────────────────────────────────
+
+function Modal({ title, onClose, wide, children }: { title: string; onClose: () => void; wide?: boolean; children: React.ReactNode }) {
+  return (
+    <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)', display: 'flex', alignItems: 'flex-start', justifyContent: 'center', padding: '3rem 1rem', zIndex: 1000, overflowY: 'auto' }}>
+      <div onClick={e => e.stopPropagation()} style={{ background: '#fff', borderRadius: 8, boxShadow: '0 8px 32px rgba(0,0,0,0.25)', width: '100%', maxWidth: wide ? 'min(1200px, calc(100vw - 2rem))' : 'min(1000px, calc(100vw - 2rem))', minWidth: 0, boxSizing: 'border-box', maxHeight: 'calc(100vh - 6rem)', overflowY: 'auto', padding: '1.25rem 1.5rem' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+          <h3 style={{ margin: 0, fontSize: '1rem', fontWeight: 600 }}>{title}</h3>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', fontSize: '1.25rem', cursor: 'pointer', color: '#666' }}>✕</button>
+        </div>
+        {children}
+      </div>
+    </div>
+  )
+}
+
+// ── Page ────────────────────────────────────────────────────────────────────────
+
+type ReportKind = 'group' | 'chart' | 'student'
 
 export default function Reports() {
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
 
-  const devGameInstanceId = import.meta.env.DEV
-    ? searchParams.get('_dev_game_instance_id')
-    : null
-  const tokenParam          = searchParams.get('token')
+  const devGameInstanceId = import.meta.env.DEV ? searchParams.get('_dev_game_instance_id') : null
+  const tokenParam = searchParams.get('token')
   const gameInstanceIdParam = searchParams.get('game_instance_id')
 
   const [sessionReady, setSessionReady] = useState(false)
-  const [authError,    setAuthError]    = useState<string | null>(null)
+  const [authError, setAuthError] = useState<string | null>(null)
 
   const makeLink = (base: string): string => {
     if (devGameInstanceId) return `${base}?_dev_game_instance_id=${encodeURIComponent(devGameInstanceId)}`
-    if (tokenParam && gameInstanceIdParam)
-      return `${base}?token=${encodeURIComponent(tokenParam)}&game_instance_id=${encodeURIComponent(gameInstanceIdParam)}`
+    if (tokenParam && gameInstanceIdParam) return `${base}?token=${encodeURIComponent(tokenParam)}&game_instance_id=${encodeURIComponent(gameInstanceIdParam)}`
     return base
   }
 
-  // ── Auth bootstrap ─────────────────────────────────────────────────────────
+  // ── Auth bootstrap ─────────────────────────────────────────────────────────────
   useEffect(() => {
     let cancelled = false
     const establish = async () => {
       await auth.authStateReady()
       if (cancelled) return
       if (auth.currentUser) {
-        const expectedUid = devGameInstanceId
-          ? `instructor_${devGameInstanceId}`
+        const expectedUid = devGameInstanceId ? `instructor_${devGameInstanceId}`
           : gameInstanceIdParam ? `instructor_${gameInstanceIdParam}` : null
         if (expectedUid && auth.currentUser.uid === expectedUid) { setSessionReady(true); return }
         await signOut(auth)
         if (cancelled) return
       }
-      const args = devGameInstanceId
-        ? { _dev: { game_instance_id: devGameInstanceId } }
-        : tokenParam ? { token: tokenParam } : null
+      const args = devGameInstanceId ? { _dev: { game_instance_id: devGameInstanceId } } : tokenParam ? { token: tokenParam } : null
       if (!args) { setAuthError('No launch token found.'); return }
       try {
         const fn = httpsCallable<object, { customToken: string }>(functions, 'getInstructorSession')
@@ -166,274 +163,132 @@ export default function Reports() {
     return () => { cancelled = true }
   }, [devGameInstanceId, tokenParam]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── Data load ──────────────────────────────────────────────────────────────
-  const [rows,      setRows]      = useState<ReportRow[] | null>(null)
-  const [questions, setQuestions] = useState<QuestionMeta[]>([])
-  const [schema,    setSchema]    = useState<OutcomeSchema | null>(null)
-  const [loading,   setLoading]   = useState(false)
-  const [error,     setError]     = useState<string | null>(null)
+  // ── Data ─────────────────────────────────────────────────────────────────────
+  const [data, setData] = useState<ReportData | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     if (!sessionReady) return
-    setLoading(true)
-    setError(null)
-    const fn = httpsCallable<object, { ok: boolean; rows: ReportRow[]; questions: QuestionMeta[]; schema: OutcomeSchema }>(functions, 'getReportData')
-    fn({}).then(r => {
-      setRows(r.data.rows)
-      setQuestions(r.data.questions)
-      setSchema(r.data.schema)
-      setLoading(false)
-    }).catch((err: unknown) => {
-      setError(err instanceof Error ? err.message : 'Failed to load report data.')
-      setLoading(false)
-    })
+    setLoading(true); setError(null)
+    const fn = httpsCallable<object, ReportData>(functions, 'getReportData')
+    fn({}).then(r => { setData(r.data); setLoading(false) })
+      .catch((err: unknown) => { setError(err instanceof Error ? err.message : 'Failed to load report data.'); setLoading(false) })
   }, [sessionReady])
 
-  // ── Inline group-contract editor (report-only: writes the group contract and
-  //    recomputes each member's raw_score via updateGroupContract; never z-scores) ──
-  const [editing,    setEditing]    = useState<{ groupId: string; groupNumber: number | null } | null>(null)
-  const [formValues, setFormValues] = useState<FormValues>({})
-  const [dealReached, setDealReached] = useState(true)
-  const [saving,     setSaving]     = useState(false)
-  const [editError,  setEditError]  = useState<string | null>(null)
-
-  const openEditor = (row: ReportRow) => {
-    if (!row.group_id || !schema) return
-    // A deal is present iff any non-text contract field has a value (no-deal → all null).
-    const hasDeal = schema.some(f => f.type !== 'text' && (row as Record<string, unknown>)[f.key] != null)
-    const vals: FormValues = {}
-    for (const f of schema) {
-      const raw = (row as Record<string, unknown>)[f.key]
-      vals[f.key] = f.type === 'boolean' ? Boolean(raw) : (raw == null ? '' : String(raw))
-    }
-    setFormValues(vals)
-    setDealReached(hasDeal)
-    setEditError(null)
-    setEditing({ groupId: row.group_id, groupNumber: row.group_number })
-  }
-
-  const saveEditor = async () => {
-    if (!editing || !schema) return
-    let outcome: Record<string, unknown> | null = null
-    if (dealReached) {
-      const parsed = parseForm(formValues, schema)
-      if (!parsed.ok) { setEditError(parsed.error); return }
-      outcome = parsed.outcome
-    }
-    setSaving(true)
-    setEditError(null)
-    try {
-      const fn = httpsCallable<
-        { groupId: string; agreement_reached: boolean; outcome: Record<string, unknown> | null },
-        { ok: boolean; rows: ReportRow[] }
-      >(functions, 'updateGroupContract')
-      const res = await fn({ groupId: editing.groupId, agreement_reached: dealReached, outcome })
-      const updated = res.data.rows
-      // Refresh the whole group's rows at once; other groups untouched.
-      setRows(prev => prev ? prev.map(r => updated.find(u => u.participant_id === r.participant_id) ?? r) : prev)
-      setEditing(null)
-    } catch (err) {
-      setEditError(err instanceof Error ? err.message : 'Failed to save contract.')
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  // ── Modal state ────────────────────────────────────────────────────────────
-  const [contractOpen, setContractOpen] = useState(false)
+  const [active, setActive] = useState<ReportKind | null>(null)
   const [activeExport, setActiveExport] = useState<{ title: string; text: string } | null>(null)
+  const chartRef = useRef<SVGSVGElement>(null)
 
-  // ── Tile config — scatter tile removed (game-specific; deferred to Part 3) ──
-  const finalized = rows?.length ?? 0
+  const rows = data?.rows ?? []
+  const groupReports = data?.groupReports ?? []
+  const timeSeries = data?.timeSeries ?? []
+  const questions = data?.questions ?? []
+
+  const openProjector = () => {
+    const svg = chartRef.current
+    if (!svg) return
+    const w = window.open('', '_blank')
+    if (w) { w.document.write(`<!doctype html><title>Price over time</title><body style="margin:0;display:flex;justify-content:center">${svg.outerHTML}</body>`); w.document.close() }
+  }
 
   const tiles: ReportTileConfig[] = [
     {
-      id: 'contract-outcomes',
-      title: 'Contract Outcomes — per participant',
-      preview: rows == null
-        ? <span style={{ color: '#888', fontSize: '0.85rem' }}>{loading ? 'Loading…' : 'No data'}</span>
-        : <span style={{ fontSize: '0.9rem', color: '#555' }}>
-            {finalized} participant{finalized !== 1 ? 's' : ''} finalized
-          </span>,
-      onOpen: () => setContractOpen(true),
-      disabled: !rows || rows.length === 0,
-      actionLabel: 'Open ↗',
+      id: 'group-summary', title: 'Group summary — one row per auction',
+      preview: <span style={{ fontSize: '0.9rem', color: '#555' }}>{groupReports.length} group{groupReports.length !== 1 ? 's' : ''}</span>,
+      onOpen: () => setActive('group'), disabled: groupReports.length === 0, actionLabel: 'Open ↗',
     },
-    // Text-question tiles (one per prep text question from prepDefaults).
+    {
+      id: 'price-chart', title: 'Price over time — by group',
+      preview: <span style={{ fontSize: '0.9rem', color: '#555' }}>{timeSeries.length} auction line{timeSeries.length !== 1 ? 's' : ''}</span>,
+      onOpen: () => setActive('chart'), disabled: timeSeries.length === 0, actionLabel: 'Open ↗',
+    },
+    {
+      id: 'per-student', title: 'Per-student report (profit + grade)',
+      preview: <span style={{ fontSize: '0.9rem', color: '#555' }}>{rows.length} student{rows.length !== 1 ? 's' : ''} finalized</span>,
+      onOpen: () => setActive('student'), disabled: rows.length === 0, actionLabel: 'Open ↗',
+    },
     ...questions.map(q => {
       const roleLabel = ROLE_LABELS[q.role_target] ?? q.role_target
       const tileTitle = `${roleLabel}: ${q.prompt}`
-      const qRows: AiTextRow[] = (rows ?? [])
-        .filter(r => r.role === q.role_target && r.text_answers[q.field])
-        .map(r => ({ name: r.display_name, raw_score: r.raw_score, answer: r.text_answers[q.field] }))
+      const qRows: AiTextRow[] = rows.filter(r => r.role === q.role_target && r.text_answers[q.field])
+        .map(r => ({ name: r.display_name, raw_score: r.participation, answer: r.text_answers[q.field] }))
       const text = buildStudentTextExport(tileTitle, qRows)
       return {
-        id: q.field,
-        title: tileTitle,
+        id: q.field, title: tileTitle,
         preview: qRows.length === 0
           ? <span style={{ color: '#94a3b8', fontSize: '0.85rem' }}>No responses yet.</span>
-          : <span style={{ fontSize: '1.25rem', fontWeight: 700, color: '#111' }}>
-              {qRows.length} response{qRows.length !== 1 ? 's' : ''}
-            </span>,
-        onOpen: () => setActiveExport({ title: tileTitle, text }),
-        disabled: !rows,
-        actionLabel: 'Open ↗',
+          : <span style={{ fontSize: '1.25rem', fontWeight: 700, color: '#111' }}>{qRows.length} response{qRows.length !== 1 ? 's' : ''}</span>,
+        onOpen: () => setActiveExport({ title: tileTitle, text }), disabled: rows.length === 0, actionLabel: 'Open ↗',
       } satisfies ReportTileConfig
     }),
   ]
 
-  // ── Render ─────────────────────────────────────────────────────────────────
   if (authError) {
-    return (
-      <div style={{ padding: '2rem', textAlign: 'center' }}>
-        <p style={{ color: '#c00' }}>{authError}</p>
-      </div>
-    )
+    return <div style={{ padding: '2rem', textAlign: 'center' }}><p style={{ color: '#c00' }}>{authError}</p></div>
   }
 
   return (
     <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column' }}>
       <GameHeader />
-
       <div style={{ padding: '1rem 1.5rem 0.5rem', display: 'flex', alignItems: 'center', gap: '1rem' }}>
-        <button
-          onClick={() => navigate(makeLink('/dashboard'))}
-          style={{ background: 'none', border: '1px solid #ccc', borderRadius: 4, padding: '0.3rem 0.8rem', cursor: 'pointer', fontSize: '0.85rem' }}
-        >
-          ← Dashboard
-        </button>
+        <button onClick={() => navigate(makeLink('/dashboard'))} style={{ background: 'none', border: '1px solid #ccc', borderRadius: 4, padding: '0.3rem 0.8rem', cursor: 'pointer', fontSize: '0.85rem' }}>← Dashboard</button>
         <h2 style={{ margin: 0, fontSize: '1.1rem', fontWeight: 600 }}>Reports — eBay</h2>
       </div>
 
       <main style={{ flex: 1, padding: '1rem 1.5rem' }}>
         {error && <p style={{ color: '#c00', marginBottom: '1rem' }}>{error}</p>}
+        {loading && !data && <p style={{ color: '#888' }}>Loading…</p>}
         <ReportBoard tiles={tiles} />
       </main>
 
-      {contractOpen && (
-        <div
-          onClick={() => setContractOpen(false)}
-          style={{
-            position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)',
-            display: 'flex', alignItems: 'flex-start', justifyContent: 'center',
-            padding: '3rem 1rem', zIndex: 1000, overflowY: 'auto',
-          }}
-        >
-          <div
-            onClick={e => e.stopPropagation()}
-            style={{
-              background: '#fff', borderRadius: 8, boxShadow: '0 8px 32px rgba(0,0,0,0.25)',
-              // Viewport-bounded so the wide table scrolls INSIDE the modal instead of
-              // stretching it: minWidth:0 lets the flex item shrink below content width.
-              width: '100%', maxWidth: 'min(1100px, calc(100vw - 2rem))', minWidth: 0,
-              boxSizing: 'border-box', maxHeight: 'calc(100vh - 6rem)', overflowY: 'auto',
-              padding: '1.25rem 1.5rem',
-            }}
-          >
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
-              <h3 style={{ margin: 0, fontSize: '1rem', fontWeight: 600 }}>Contract Outcomes — per participant</h3>
-              <button
-                onClick={() => setContractOpen(false)}
-                style={{ background: 'none', border: 'none', fontSize: '1.25rem', cursor: 'pointer', color: '#666' }}
-              >
-                ✕
-              </button>
-            </div>
-            <div style={{ overflow: 'auto', maxHeight: 'calc(100vh - 14rem)', border: '1px solid #ddd', borderRadius: 6 }}>
-              <SortableTable<ReportRow, SortKey>
-                rows={rows ?? []}
-                columns={[
-                  ...COLUMNS,
-                  {
-                    key: 'edit', label: '', headerStyle: { cursor: 'default' }, sticky: 'right',
-                    render: r => (
-                      <button
-                        onClick={() => openEditor(r)}
-                        disabled={!r.group_id || !schema}
-                        style={{ background: 'none', border: '1px solid #ccc', borderRadius: 4, padding: '0.2rem 0.6rem', cursor: 'pointer', fontSize: '0.8rem' }}
-                      >
-                        Edit
-                      </button>
-                    ),
-                    compare: () => 0,
-                  },
-                ]}
-                getRowKey={r => r.participant_id}
-                initialSortKey="group"
-                roleLabels={ROLE_LABELS}
-                getRowRole={r => r.role}
-                emptyMessage="No finalized participants yet."
-                wrapHeaders
-              />
-            </div>
+      {/* Report 1 — group summary */}
+      {active === 'group' && (
+        <Modal title="Group summary — one row per auction" wide onClose={() => setActive(null)}>
+          <div style={{ overflow: 'auto', maxHeight: 'calc(100vh - 14rem)', border: '1px solid #ddd', borderRadius: 6 }}>
+            <SortableTable<GroupReport, GroupSortKey>
+              rows={groupReports} columns={GROUP_COLUMNS}
+              getRowKey={r => r.group_id} initialSortKey="group"
+              emptyMessage="No auctions yet." wrapHeaders />
           </div>
-        </div>
+        </Modal>
       )}
 
-      {editing && schema && (
-        <div
-          onClick={() => !saving && setEditing(null)}
-          style={{
-            position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)',
-            display: 'flex', alignItems: 'flex-start', justifyContent: 'center',
-            padding: '3rem 1rem', zIndex: 1100, overflowY: 'auto',
-          }}
-        >
-          <div
-            onClick={e => e.stopPropagation()}
-            style={{ background: '#fff', borderRadius: 8, boxShadow: '0 8px 32px rgba(0,0,0,0.3)', width: '100%', maxWidth: 460, padding: '1.25rem 1.5rem' }}
-          >
-            <h3 style={{ margin: '0 0 1rem', fontSize: '1rem', fontWeight: 600 }}>
-              Edit group {editing.groupNumber ?? '—'} contract
-            </h3>
-            <p style={{ margin: '0 0 1rem', fontSize: '0.85rem', color: '#666' }}>
-              Applies to the whole group; all members' raw scores recompute.
-            </p>
-
-            <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '1rem', fontWeight: 600 }}>
-              <input
-                type="checkbox"
-                checked={dealReached}
-                onChange={e => { setDealReached(e.target.checked); setEditError(null) }}
-                disabled={saving}
-                style={{ width: 18, height: 18 }}
-              />
-              Deal reached {dealReached ? '' : '— group walked away (no deal)'}
-            </label>
-
-            <div style={{ opacity: dealReached ? 1 : 0.5 }}>
-              {schema.map(field => (
-                <SchemaField
-                  key={field.key}
-                  field={field}
-                  value={formValues[field.key] ?? (field.type === 'boolean' ? false : '')}
-                  onChange={v => { setFormValues(prev => ({ ...prev, [field.key]: v })); setEditError(null) }}
-                  disabled={saving || !dealReached}
-                />
-              ))}
-            </div>
-
-            {editError && <p style={{ color: '#c00', margin: '0 0 0.75rem', fontSize: '0.9rem' }}>{editError}</p>}
-
-            <div style={{ display: 'flex', gap: '0.75rem', marginTop: '0.5rem' }}>
-              <button onClick={saveEditor} disabled={saving} style={{ padding: '0.4rem 1rem', cursor: 'pointer' }}>
-                {saving ? 'Saving…' : 'Save'}
-              </button>
-              <button onClick={() => setEditing(null)} disabled={saving} style={{ padding: '0.4rem 1rem', background: 'none', border: '1px solid #ccc', borderRadius: 4, cursor: 'pointer' }}>
-                Cancel
-              </button>
-            </div>
+      {/* Report 2 — price over time */}
+      {active === 'chart' && (
+        <Modal title="Price over time — by group (elapsed seconds)" wide onClose={() => setActive(null)}>
+          <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: '0.5rem' }}>
+            <button onClick={openProjector} style={{ fontSize: '0.85rem', padding: '0.3rem 0.75rem' }}>Open in projector ↗</button>
           </div>
-        </div>
+          <div data-testid="price-chart" style={{ overflowX: 'auto' }}>
+            <PriceOverTimeSVG series={timeSeries} svgRef={chartRef} />
+          </div>
+          <p style={{ fontSize: '0.85rem', color: '#666', marginTop: '0.75rem' }}>
+            X axis is elapsed seconds from each group&apos;s own auction start (0 → duration), so lines overlay for
+            comparison. The staircase reflects the price holding flat between bids and jumping at each bid — a tall late
+            step is a snipe.
+          </p>
+        </Modal>
       )}
 
-      {activeExport && (
-        <ExportModal
-          title={activeExport.title}
-          text={activeExport.text}
-          onClose={() => setActiveExport(null)}
-        />
+      {/* Report 3 — per-student */}
+      {active === 'student' && (
+        <Modal title="Per-student report" wide onClose={() => setActive(null)}>
+          <p style={{ fontSize: '0.85rem', color: '#444', margin: '0 0 0.75rem' }}>
+            <strong>Outcome</strong> and <strong>Profit</strong> are game results — <em>not</em> grades. The grade is
+            <strong> Participation</strong> (present = 1) + <strong>KC score</strong>. Profit never enters the grade.
+          </p>
+          <div style={{ overflow: 'auto', maxHeight: 'calc(100vh - 16rem)', border: '1px solid #ddd', borderRadius: 6 }}>
+            <SortableTable<StudentReportRow, StudentSortKey>
+              rows={rows} columns={STUDENT_COLUMNS}
+              getRowKey={r => r.participant_id} initialSortKey="group"
+              roleLabels={ROLE_LABELS} getRowRole={r => r.role}
+              emptyMessage="No finalized participants yet." wrapHeaders />
+          </div>
+        </Modal>
       )}
+
+      {activeExport && <ExportModal title={activeExport.title} text={activeExport.text} onClose={() => setActiveExport(null)} />}
     </div>
   )
 }

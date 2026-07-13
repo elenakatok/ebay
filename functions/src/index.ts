@@ -58,7 +58,6 @@ export const submitKnowledgeCheck               = makeSubmitKnowledgeCheck(ebayG
 export const submitStaticKnowledgeCheckQuestion = makeSubmitStaticKnowledgeCheckQuestion(ebayGameDef)
 export const getInfoUrls                        = makeGetInfoUrls(ebayGameDef)
 export { getReportData } from './getReportData'
-export { updateGroupContract } from './updateGroupContract'
 export { scoreAndRecord } from './scoreAndRecord'
 
 // ── Part 3 Slice 0: endowment assignment at match time (Firestore onCreate trigger) ──

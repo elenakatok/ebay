@@ -136,5 +136,68 @@ export const triggerMatching = () =>
 export const finalizeInstance = () =>
   callFn<{ ok: boolean }>('finalizeInstance', {})
 
+// ── Reports (Slice 7) — mirrors functions/src/getReportData.ts ────────────────────
+
+export type MemberOutcome = 'Won' | 'Lost' | 'No bid' | '—'
+export type AuctionStatus = 'not-started' | 'open' | 'closed' | 'resolved'
+
+export type GroupMemberOutcome = {
+  participant_id: string
+  name: string
+  bidder_label: string
+  outcome: MemberOutcome
+}
+
+export type GroupReport = {
+  group_number: number | null
+  group_id: string
+  auction_status: AuctionStatus
+  no_sale: boolean
+  highest_bid: number | null
+  auction_price: number | null
+  winner_profit: number | null
+  high_bidder_name: string | null
+  high_bidder_label: string | null
+  time_highest_sec: number | null
+  second_bidder_name: string | null
+  second_bidder_label: string | null
+  time_second_sec: number | null
+  expert_name: string | null
+  members: GroupMemberOutcome[]
+}
+
+export type GroupSeries = {
+  group_number: number | null
+  group_id: string
+  duration_seconds: number
+  points: Array<{ t: number; price: number }>
+}
+
+export type StudentReportRow = {
+  participant_id: string
+  display_name: string
+  group_number: number | null
+  group_id: string | null
+  role: string
+  bidder_label: string | null
+  profit: number | null
+  participation: number | null
+  knowledge_check_score: number | null
+  outcome_label: MemberOutcome | null
+  text_answers: Record<string, string>
+}
+
+export type ReportQuestion = { field: string; prompt: string; role_target: string }
+
+export type ReportData = {
+  ok: boolean
+  rows: StudentReportRow[]
+  groupReports: GroupReport[]
+  timeSeries: GroupSeries[]
+  questions: ReportQuestion[]
+}
+
+export const getReportData = () => callFn<ReportData>('getReportData', {})
+
 export const pushResultsToClassroom = () =>
   callFn<{ ok: boolean } & PushSummary>('pushResultsToClassroom', {})

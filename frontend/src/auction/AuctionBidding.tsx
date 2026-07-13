@@ -41,6 +41,8 @@ export interface AuctionLive {
 export interface AuctionLabels {
   itemName: string
   itemImageUrl: string
+  /** Prefix for the persistent identity line, e.g. "You are" → "You are Bidder 3". */
+  identityPrefix: string
   winning: string
   notWinning: string
   noBids: string
@@ -186,14 +188,30 @@ export default function AuctionBidding(props: AuctionBiddingProps) {
       data-testid="auction-screen"
       style={{ maxWidth: 760, margin: '0 auto', padding: '1rem 1.25rem', fontFamily: 'inherit' }}
     >
-      {/* 1 — Item header (no shipping / item number / payment / legal) */}
-      <div style={{ display: 'flex', gap: '1rem', alignItems: 'center', marginBottom: '0.5rem' }}>
+      {/* 1 — Item header (no shipping / item number / payment / legal). The image is the
+             item being auctioned — shown large (220px), the name beside it. */}
+      <div style={{ display: 'flex', gap: '1.25rem', alignItems: 'center', marginBottom: '0.5rem' }}>
         <img
           src={labels.itemImageUrl}
           alt={labels.itemName}
-          style={{ width: 96, height: 96, objectFit: 'cover', borderRadius: 6, border: '1px solid #ddd' }}
+          style={{ width: 220, height: 220, objectFit: 'cover', borderRadius: 8, border: '1px solid #ddd', flexShrink: 0 }}
         />
-        <h1 style={{ margin: 0, fontSize: '1.5rem' }}>{labels.itemName}</h1>
+        <h1 style={{ margin: 0, fontSize: '1.6rem' }}>{labels.itemName}</h1>
+      </div>
+
+      {/* 1b — WHO AM I: persistent, prominent identity. Uses the EXACT history label so a
+             bidder connects their private info + their own history row to themselves. The
+             expert learns their role here, not just whispered in the gray private box. */}
+      <div
+        data-testid="auction-identity"
+        data-bidder={myBidderIndex}
+        style={{
+          fontSize: '1.2rem', fontWeight: 700, textAlign: 'center',
+          padding: '0.4rem 0.75rem', margin: '0 0 0.5rem',
+          background: '#eef2ff', border: '1px solid #c7d2fe', borderRadius: 8, color: '#3730a3',
+        }}
+      >
+        {labels.identityPrefix} {bidderLabel(myBidderIndex)}
       </div>
 
       {/* 2 — THE STATUS LINE */}

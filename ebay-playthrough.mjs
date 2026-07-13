@@ -434,7 +434,7 @@ async function driveSetup(page, pid) {
 async function driveToWaiting(s, code) {
   const { page, pid } = s
   await page.click('button:has-text("in class")')
-  await page.waitForSelector('h1:has-text("Ready to negotiate?")', { timeout: 20_000 })
+  await page.waitForSelector('h1:has-text("Ready to join the auction?")', { timeout: 20_000 })
   await page.click("button:has-text(\"Yes, I'm ready\")")
   await page.waitForSelector('h1:has-text("Enter attendance code")', { timeout: 20_000 })
   await page.locator('input').fill(code)
@@ -466,66 +466,9 @@ async function saveAuctionSettings(page, durationSeconds, increment = 1) {
   await page.waitForSelector('span:has-text("Saved ")', { timeout: 15_000 }).catch(() => {})
 }
 
-// ── Group reveal → off-platform → (report form ready) ───────────────────────────
-
-async function startGroupToReport(members) {
-  // One "Start negotiation" click → the rest auto-advance to "Go negotiate".
-  await members[0].page.waitForSelector('h1:has-text("Your negotiation group")', { timeout: 60_000 })
-  await members[0].page.click('button:has-text("Start negotiation")')
-  await members[0].page.waitForSelector('h1:has-text("Go negotiate")', { timeout: 20_000 })
-  for (const m of members.slice(1)) {
-    const flipped = await m.page.waitForSelector('h1:has-text("Go negotiate")', { timeout: 15_000 })
-      .then(() => true).catch(() => false)
-    if (!flipped) { await m.page.click('button:has-text("Start negotiation")'); await m.page.waitForSelector('h1:has-text("Go negotiate")', { timeout: 15_000 }) }
-  }
-  // Everyone taps "We've finished — report our outcome".
-  await Promise.all(members.map(m => m.page.click("button:has-text(\"We've finished\")").catch(() => {})))
-}
-
-/** Lead fills the placeholder price + submits a deal; non-leads all Confirm. */
-async function reportPriceDeal(members, price) {
-  const lead = members.find(m => m.is_lead) ?? members[0]
-  const nonLeads = members.filter(m => m !== lead)
-  await lead.page.waitForSelector('h1:has-text("Report outcome")', { timeout: 30_000 })
-  await lead.page.locator('input[type="number"]').fill(String(price))
-  await lead.page.click('button:has-text("Review & submit")')
-  await lead.page.waitForSelector('h1:has-text("Confirm outcome")', { timeout: 10_000 })
-  await lead.page.click('button:has-text("Yes, submit")')
-  // Confirm one at a time — submitConfirmation is a transaction on the shared group doc, and the
-  // Firestore emulator lock-times-out under concurrent transactions on one doc (same failure mode
-  // as role_counts). Sequential confirms keep it deterministic.
-  for (const m of nonLeads) {
-    await m.page.waitForSelector('h1:has-text("Confirm the outcome")', { timeout: 30_000 })
-    await m.page.click('button:has-text("Confirm")')
-  }
-}
-
-/** Lead reports NO DEAL (walk-away); all non-leads Confirm. Present-but-no-bid case. */
-async function reportNoDeal(members) {
-  const lead = members.find(m => m.is_lead) ?? members[0]
-  const nonLeads = members.filter(m => m !== lead)
-  await lead.page.waitForSelector('h1:has-text("Report outcome")', { timeout: 30_000 })
-  await lead.page.click('button:has-text("No deal")')
-  await lead.page.waitForSelector('h1:has-text("Confirm no deal")', { timeout: 10_000 })
-  await lead.page.click('button:has-text("Yes, no deal")')
-  for (const m of nonLeads) {
-    await m.page.waitForSelector('h1:has-text("Confirm the outcome")', { timeout: 30_000 })
-    await m.page.click('button:has-text("Confirm")')
-  }
-}
-
-/** One reject cycle: lead reports a price, one non-lead REJECTS → group resets. */
-async function rejectCycle(members, price) {
-  const lead = members.find(m => m.is_lead) ?? members[0]
-  const rejecter = members.find(m => m !== lead)
-  await lead.page.waitForSelector('h1:has-text("Report outcome")', { timeout: 30_000 })
-  await lead.page.locator('input[type="number"]').fill(String(price))
-  await lead.page.click('button:has-text("Review & submit")')
-  await lead.page.waitForSelector('h1:has-text("Confirm outcome")', { timeout: 10_000 })
-  await lead.page.click('button:has-text("Yes, submit")')
-  await rejecter.page.waitForSelector('h1:has-text("Confirm the outcome")', { timeout: 30_000 })
-  await rejecter.page.click('button:has-text("Reject")')
-}
+// (Slice 7) The negotiation-flow helpers — startGroupToReport / reportPriceDeal /
+// reportNoDeal / rejectCycle — were DELETED here: eBay is a self-resolving auction, those
+// screens no longer exist, and the helpers were already dead (never called since Slice 5).
 
 // ── Local stack lifecycle (unconditional clean-start) ───────────────────────────
 
@@ -799,6 +742,27 @@ async function main() {
   const noDealMembers   = membersOf(noDealGid)
   const bidderIndexOf   = pid => byPid[pid]?.bidderIndex
 
+  // ══════════════ SLICE 7a — NO DEAD NEGOTIATION SCREENS ══════════════
+  // After match (pre-auction) a student lands in the AUCTION ROOM — never the deleted
+  // "Your negotiation group" / "Start negotiation" / "Report outcome" / "Final price" /
+  // "No deal" screens. Reloading stays coherent (no blank page / routing hole).
+  banner('Slice 7a — matched → AUCTION ROOM (no negotiation screen), reload stays coherent')
+  const NEGO_RE = /Your negotiation group|Start negotiation|Report outcome|Final price|No deal|Confirm the outcome|We've finished/i
+  const roomSample = happyMembers[0]
+  await roomSample.page.waitForSelector('[data-testid="auction-room"]', { timeout: 25_000 })
+  const roomBody = await bodyText(roomSample.page)
+  assert(!NEGO_RE.test(roomBody) && /auction room/i.test(roomBody),
+    `7a — a matched student sees the AUCTION ROOM, NOT any negotiation screen (no "Your negotiation group"/"Start negotiation"/"Report outcome"/"Final price"/"No deal")`)
+  await roomSample.page.reload()
+  const roomBack = await roomSample.page.waitForSelector('[data-testid="auction-room"]', { timeout: 25_000 }).then(() => true).catch(() => false)
+  assert(roomBack, `7a — reload of a matched student lands back on the auction room (no dead end / blank page)`)
+  // The whole matched cohort is on a coherent (non-blank) screen — no routing holes.
+  const allCoherent = await Promise.all(happyMembers.map(async m => {
+    const t = (await bodyText(m.page)).trim()
+    return t.length > 0 && !NEGO_RE.test(t)
+  }))
+  assert(allCoherent.every(Boolean), `7a — every matched student has a coherent, non-negotiation screen (no blank pages)`)
+
   // ══════════════ SLICE 4 — LIVE AUCTION, driven through the REAL bidding UI ══════════════
   // Every student bid below is a real fill-field + click-Place-bid on the student's own
   // browser (the Slice 3 harness poked submitBid directly; those calls are GONE). The
@@ -834,6 +798,15 @@ async function main() {
   const reached = await Promise.all(happyMembers.map(m => waitAuctionScreen(m.page).then(() => true).catch(() => false)))
   assert(reached.every(Boolean), `Auction UI — all ${happyMembers.length} students reach the live bidding screen after Start`)
 
+  // ── 7c — persistent identity line, matching the EXACT history label (expert shows "(Expert)") ──
+  const identityOf = m => m.page.locator('[data-testid="auction-identity"]').innerText()
+  const id1 = (await identityOf(B1)).replace(/\s+/g, ' ').trim()
+  const id3 = (await identityOf(B3)).replace(/\s+/g, ' ').trim()
+  assert(/^You are Bidder 1 \(Expert\)$/.test(id1),
+    `7c — the EXPERT's live screen shows "You are Bidder 1 (Expert)" — announced, not whispered (got "${id1}")`)
+  assert(/^You are Bidder 3$/.test(id3),
+    `7c — a non-expert shows "You are Bidder N" matching their history label, no "(Expert)" (got "${id3}")`)
+
   // Clock counts down from the STORED 60s (cosmetic, server-clock offset). Read it twice.
   const clock0 = await B1.page.locator('[data-testid="auction-clock"]').innerText()
   await sleep(1500)
@@ -848,6 +821,9 @@ async function main() {
   const expertBody = await bodyText(B1.page)
   assert(/expert/i.test(expertBody) && expertBody.includes('$2,650') && /exactly/i.test(expertBody),
     `Auction UI — the EXPERT (bidder 1) sees "$2,650 … exactly" in their private info`)
+  // 7c — the expert role is also emphasized as a badge in the private-info panel.
+  assert(/YOU ARE THE EXPERT/.test(expertBody),
+    `7c — the expert's private-info panel emphasizes the role with a "YOU ARE THE EXPERT" badge`)
 
   // SCOPED TO THE PRE-CLOSE BIDDING SCREEN (Slice 5 note): a non-expert may legitimately
   // see 2650 ONLY after close, on the reveal. Here, on the live bidding screen, each
@@ -988,6 +964,14 @@ async function main() {
   // The NEGATIVE profit is rendered unmistakably (a real minus sign) on the winner's screen.
   assert((await bodyText(C4.page)).includes('−$151'),
     `Conformance — the winner's NEGATIVE profit −$151 is shown unmistakably (the winner's curse lands)`)
+
+  // ── 7b — PERSPECTIVE: the winner's own summary is 2nd person; onlookers' is 3rd person ──
+  const c4Summary = (await C4.page.locator('[data-testid="results-summary"]').innerText()).replace(/\s+/g, ' ').trim()
+  const c1Summary = (await C1.page.locator('[data-testid="results-summary"]').innerText()).replace(/\s+/g, ' ').trim()
+  assert(/\bYou paid\b/.test(c4Summary) && !/The winner paid/.test(c4Summary),
+    `7b — the WINNER's results summary is SECOND person ("You paid…") (got "${c4Summary.slice(0, 70)}…")`)
+  assert(/The winner paid/.test(c1Summary) && !/\bYou paid\b/.test(c1Summary),
+    `7b — a LOSER's results summary stays THIRD person ("The winner paid…") (got "${c1Summary.slice(0, 70)}…")`)
 
   // The REVEAL: every student now sees the true value 2650 (the FIRST legit 2650 for non-experts).
   const revealOk = await Promise.all(confMembers.map(async m => (await dataAttr(m.page, 'results-reveal', 'data-true-value')) === '2650'))
@@ -1162,24 +1146,80 @@ async function main() {
   assert(kcOf(NOSHOW_PID) === 1,
     `KC score — the no-show completed KC before leaving: score 1.0 still rides to the gradebook (got ${kcOf(NOSHOW_PID)})`)
 
-  // ── (9) REPORTS page — renders for a RESOLVED auction (never exercised before) ──
-  banner('Reports — instructor Reports page loads for a resolved auction (KC column, no negotiation-era crash)')
+  // ══════════════════ SLICE 7d — INSTRUCTOR DASHBOARD ══════════════════
+  // Start Auction at the TOP (above the roster); the auction OUTCOME per student is
+  // Won / Lost / No bid — NEVER "+1" (a grading internal) and NEVER "Absent" for a present
+  // non-bidder. (The shared roster's own "Outcome" column still shows raw_score — that is
+  // hard-coded shared game-ui and cannot be changed from eBay's side; this eBay panel
+  // surfaces the real game outcome instead.)
+  banner('Slice 7d — dashboard: Start Auction at the TOP; per-student Won/Lost/No bid (never +1, never Absent)')
+  await dash.goto(dashboardUrl())
+  await dash.waitForSelector('h1:has-text("Instructor Dashboard — eBay")', { timeout: 30_000 })
+  await dash.waitForSelector('[data-testid="auction-controls"]', { timeout: 30_000 })
+  // Panel populates from getReportData — wait for a resolved outcome chip.
+  await dash.waitForSelector('[data-testid="dash-member-outcome"][data-outcome="Won"]', { timeout: 20_000 })
+
+  // Fix 1 — the auction panel (Start Auction lived here) sits ABOVE the roster (top of page).
+  const panelBox  = await dash.locator('[data-testid="auction-controls"]').boundingBox()
+  const rosterBox = await dash.locator('table').first().boundingBox()
+  assert(panelBox && rosterBox && panelBox.y < rosterBox.y,
+    `7d — the Start-Auction / auction panel sits ABOVE the roster (panel.y=${Math.round(panelBox?.y ?? -1)} < roster.y=${Math.round(rosterBox?.y ?? -1)})`)
+
+  // Fix 2 — per-student GAME outcome chips: Won / Lost / No bid; NEVER "Absent"/"+1".
+  const chips = await dash.locator('[data-testid="dash-member-outcome"]').evaluateAll(els => els.map(e => e.getAttribute('data-outcome')))
+  const chipSet = new Set(chips)
+  assert(chipSet.has('Won') && chipSet.has('Lost') && chipSet.has('No bid'),
+    `7d — the dashboard shows the GAME outcome per student: Won / Lost / No bid [${[...chipSet].join(', ')}]`)
+  assert(!chips.includes('Absent') && !chips.includes('+1') && !chips.includes('1'),
+    `7d — no chip reads "Absent" or "+1" (the participation internal never leaks into the auction outcome)`)
+  const nsChips = await dash.locator(`[data-testid="auction-row-${nsGid}"] [data-testid="dash-member-outcome"]`).evaluateAll(els => els.map(e => e.getAttribute('data-outcome')))
+  assert(nsChips.length === nsMembers.length && nsChips.every(c => c === 'No bid'),
+    `7d — the no-sale group's present non-bidders all show "No bid" (present, NOT Absent) [${nsChips.join(',')}]`)
+
+  // ══════════════════ SLICE 7e — THE THREE REPORTS ══════════════════
+  banner('Slice 7e — three reports: group summary, price-over-time chart, per-student profit')
   await dash.goto(`${FE}/reports?_dev_game_instance_id=${encodeURIComponent(GID)}&_session=tab`)
   await dash.waitForSelector('h2:has-text("Reports — eBay")', { timeout: 30_000 })
-  // Wait for getReportData to load — the tile enables + shows "N participants finalized"
-  // (until then the tile card is disabled and clicking it is a no-op).
-  await dash.waitForSelector('text=participants finalized', { timeout: 20_000 })
-  // Open the "Contract Outcomes" tile (a clickable card div, not a button).
-  await dash.getByText('Contract Outcomes — per participant', { exact: true }).first().click()
+  await dash.waitForSelector('text=students finalized', { timeout: 20_000 })   // per-student tile loaded → data ready
+  const closeModal = () => dash.locator('button:has-text("✕")').first().click()
+
+  // ── Report 1 — group summary: winner + clearing + elapsed timings; no-sale renders ──
+  await dash.getByText('Group summary — one row per auction', { exact: true }).first().click()
   await dash.waitForSelector('table', { timeout: 15_000 })
-  const reportBody = await dash.locator('body').innerText()
-  const kcTexts    = await dash.locator('[data-testid="report-kc"]').allInnerTexts()
-  assert(/KC score/.test(reportBody) && kcTexts.length === ATTEND_PIDS.length,
-    `Reports — the page renders a per-participant table with a KC-score column for all ${ATTEND_PIDS.length} present students (got ${kcTexts.length})`)
-  assert(kcTexts.some(t => t.includes('3 / 5')) && kcTexts.some(t => t.includes('0 / 5')) && kcTexts.some(t => t.includes('5 / 5')),
-    `Reports — the KC column shows the real varying scores (3/5, 0/5, 5/5) [${[...new Set(kcTexts)].join(', ')}]`)
-  assert(!/NaN|undefined|Bidder null/.test(reportBody),
-    `Reports — no NaN / undefined / negotiation-era leftovers for a resolved auction`)
+  const groupBody = await dash.locator('body').innerText()
+  assert(/Bidder 4/.test(groupBody) && /\$2,901/.test(groupBody) && /Expert Name/.test(groupBody),
+    `Report 1 — group summary shows the winner (Bidder 4), clearing $2,901, and an Expert Name column`)
+  assert(/No sale/.test(groupBody), `Report 1 — the no-sale group renders "No sale" without crashing`)
+  assert(/\d+s\b/.test(groupBody) && !/NaN|undefined/.test(groupBody),
+    `Report 1 — elapsed-second timings render (Ns) with no NaN/undefined`)
+  await closeModal()
+
+  // ── Report 2 — price-over-time chart: SVG, elapsed-seconds X axis, one line per group ──
+  await dash.getByText('Price over time — by group', { exact: true }).first().click()
+  await dash.waitForSelector('[data-testid="price-chart"] svg', { timeout: 15_000 })
+  // SVG <text> is not part of innerText — query the text elements directly.
+  const axisHits   = await dash.locator('[data-testid="price-chart"] svg text', { hasText: 'Elapsed seconds' }).count()
+  const legendHits = await dash.locator('[data-testid="price-chart"] svg text', { hasText: /Group \d/ }).count()
+  const lineHits   = await dash.locator('[data-testid="price-chart"] svg path').count()
+  assert(axisHits >= 1 && legendHits >= 3 && lineHits >= 3,
+    `Report 2 — the chart renders: "Elapsed seconds" X axis, one legend + one line per group (axis=${axisHits}, legend=${legendHits}, lines=${lineHits})`)
+  await closeModal()
+
+  // ── Report 3 — per-student: PROFIT (not "Score"); cursed negative profit; grade distinct ──
+  await dash.getByText('Per-student report (profit + grade)', { exact: true }).first().click()
+  await dash.waitForSelector('[data-testid="report-profit"]', { timeout: 15_000 })
+  const studentBody  = await dash.locator('body').innerText()
+  const profitCells  = await dash.locator('[data-testid="report-profit"]').allInnerTexts()
+  const kcCells      = await dash.locator('[data-testid="report-kc"]').count()
+  const partCells    = await dash.locator('[data-testid="report-participation"]').count()
+  assert(/Profit/.test(studentBody) && profitCells.some(t => t.includes('−$151')),
+    `Report 3 — a PROFIT column shows the cursed winner's negative −$151 [${profitCells.filter(t => t.includes('$')).slice(0, 4).join(', ')}]`)
+  assert(kcCells === ATTEND_PIDS.length && partCells === ATTEND_PIDS.length,
+    `Report 3 — Participation (grade) AND KC (grade) columns present for all ${ATTEND_PIDS.length} students, separate from profit`)
+  assert(/not grades|not a grade/i.test(studentBody),
+    `Report 3 — profit is explicitly NOT a grade (the report labels the distinction), and profit is never titled "Score"`)
+  assert(!/NaN|undefined|Bidder null/.test(studentBody),
+    `Report 3 — no NaN / undefined leftovers for a resolved auction`)
 }
 
 // ── Entry point ─────────────────────────────────────────────────────────────────

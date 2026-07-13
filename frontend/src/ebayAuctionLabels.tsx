@@ -38,6 +38,7 @@ export const EBAY_CONFIRM = { multiple: 2, floor: 10_000 }
 export const ebayAuctionLabels: AuctionLabels = {
   itemName: 'Vintage French Horn',
   itemImageUrl: '/frenchHorn.jpg',
+  identityPrefix: 'You are',
   winning: 'YOU ARE WINNING',
   notWinning: 'YOU ARE NOT WINNING',
   noBids: 'No bids yet',
@@ -95,7 +96,10 @@ export const ebayAuctionResultsLabels: AuctionResultsLabels = {
   estimateCell: (signal, isExpert) => (isExpert ? `${money(signal)} (exact)` : money(signal)),
   historyHeading: 'Bid history',
   historyCols: { bidder: 'Bidder', bid: 'Bid', time: 'Time' },
-  summaryText: (result: AuctionResult) => {
+  // Perspective-aware: `you` selects second person (the winner's own screen) vs third
+  // person (every other bidder's screen). Elena confirmed the third-person loser copy is
+  // right — do not change it; only the winner's own view flips to "You…".
+  summaryText: (result: AuctionResult, viewerIsWinner: boolean) => {
     if (result.winnerBidderIndex === null || result.clearingPrice === null) {
       return <span>Nobody placed a bid, so the horn did not sell.</span>
     }
@@ -103,20 +107,25 @@ export const ebayAuctionResultsLabels: AuctionResultsLabels = {
     if (!w) return null
     const delta = w.signal - result.vCommon
     const dir = delta >= 0 ? 'above' : 'below'
+    // Pronoun kit — winner's own screen (2nd person) vs onlookers (3rd person).
+    const P = viewerIsWinner
+      ? { Subj: 'You', subj: 'you', poss: 'Your', obj: 'you', paidV: 'paid', wasV: 'was', theirEst: 'Your estimate' }
+      : { Subj: 'The winner', subj: 'they', poss: 'Their', obj: 'them', paidV: 'paid', wasV: 'was', theirEst: 'Their estimate' }
+
     if (w.profit < 0) {
       return (
         <span>
-          The winner paid more than the horn was worth to them. Their estimate of the resale
+          {P.Subj} {P.paidV} more than the horn was worth to {P.obj}. {P.poss} estimate of the resale
           value was <strong>{money(Math.abs(delta))} {dir}</strong> the truth — and the auction
-          made them pay for that optimism. <strong>This is the winner&apos;s curse.</strong>
+          made {P.obj} pay for that optimism. <strong>This is the winner&apos;s curse.</strong>
         </span>
       )
     }
     const rel = delta === 0 ? <strong>exactly right</strong> : <><strong>{money(Math.abs(delta))} {dir}</strong> the truth</>
     return (
       <span>
-        The winner came out ahead: they paid {money(result.clearingPrice)} for something worth{' '}
-        {money(w.realizedValue)} to them. Their estimate was {rel}.
+        {viewerIsWinner ? 'You came out ahead: you' : 'The winner came out ahead: they'} paid {money(result.clearingPrice)} for something worth{' '}
+        {money(w.realizedValue)} to {P.obj}. {P.theirEst} {P.wasV} {rel}.
       </span>
     )
   },
@@ -129,7 +138,12 @@ export function ebayPrivateInfo(e: EbayEndowment): React.ReactNode {
   if (isExpert) {
     return (
       <div>
-        <p style={{ ...line, fontWeight: 700 }}>You are the expert.</p>
+        <p style={{ ...line, marginBottom: '0.4rem' }}>
+          <span style={{
+            display: 'inline-block', background: '#137333', color: '#fff', fontWeight: 800,
+            fontSize: '0.95rem', letterSpacing: '0.02em', padding: '0.2rem 0.6rem', borderRadius: 6,
+          }}>★ YOU ARE THE EXPERT</span>
+        </p>
         <p style={line}>The resale value is <strong>{money(e.signal)}</strong> — you know this exactly.</p>
         <p style={line}>Your private use value: <strong>{money(e.privateValue)}</strong>.</p>
         <p style={line}>If you win, the horn is worth <strong>{money(e.signal + e.privateValue)}</strong> to you.</p>
