@@ -31,11 +31,17 @@
  *   7. Deadlock override: the dashboard control submits { price } (NOT { placeholder }) —
  *      locks in the Part-1 fix of the latent Hawks-scaffold bug.
  *   8. No-deal walk-away: present-but-no-bid students score raw 0 (present), NOT −2.
- *   9. LIVE AUCTION (Slice 3): Start button opens the auction; the STORED duration
- *      override (60s, not 600) takes effect; the startAuction guard blocks an
- *      un-endowed group; 4 simultaneous bids settle to the exact proxy price with no
- *      lost updates; no confidential max appears anywhere in RTDB; a post-deadline
- *      bid is rejected (server clock is the only truth) and closes the auction.
+ *   9. LIVE AUCTION (Slice 4 — driven through the REAL student bidding UI): Start button
+ *      opens the auction; the STORED duration override (60s) takes effect; every student
+ *      reaches the bidding screen; the clock counts down; the private-info panel is
+ *      correct per role and NO non-expert ever sees the expert value (2650); status
+ *      flips winning/not-winning; one history row per submitted bid; a losing max (109)
+ *      never renders; the personal outbid + defended messages appear; raise-only is
+ *      rejected; the fat-finger confirm fires and Cancel does not submit; 4 simultaneous
+ *      UI bids settle to the exact proxy price 3001 with no lost updates; no confidential
+ *      max appears anywhere in RTDB; the startAuction guard blocks an un-endowed group;
+ *      at the server deadline the clock stops and the bid control vanishes (no snipe).
+ *      Every student bid is a real fill-field + click — NO submitBid callable is poked.
  *  10. Finalize: Score & Record → stub scoring runs → real grade push fires (POST + 200).
  *
  * REMOVED vs the 2-role baseline (obsolete under single role): the "2 expert + 6
@@ -255,6 +261,24 @@ function numericLeaves(node, out = []) {
   if (typeof node === 'number') { out.push(node); return out }
   if (typeof node === 'object') for (const v of Object.values(node)) numericLeaves(v, out)
   return out
+}
+
+// ── Slice 4: drive the REAL student bidding UI (never a submitBid callable) ───────
+// The frozen eBay endowment table (functions/src/ebayAuction.ts), by bidderIndex —
+// so the harness can assert each role's private-info panel and prove no non-expert
+// ever sees the expert's exact value (2650).
+const EBAY_SIGNAL = { 1: 2650, 2: 1900, 3: 2850, 4: 3200, 5: 2650, 6: 2300, 7: 3000 }
+const EBAY_USE    = { 1: 0,    2: 100,  3: 300,  4: 100,  5: 100,  6: 200,  7: 100 }
+const dollars = n => '$' + n.toLocaleString('en-US')
+
+const AUCTION_SCREEN = '[data-testid="auction-screen"]'
+const waitAuctionScreen = (page, ms = 25_000) => page.waitForSelector(AUCTION_SCREEN, { timeout: ms })
+const bodyText    = page => page.locator('body').innerText()
+const historyRows = page => page.locator('[data-testid="auction-history-row"]').count()
+// Fill the max field + click Place bid (no fat-finger dialog expected for these amounts).
+async function uiBid(page, amount) {
+  await page.locator('[data-testid="auction-max-input"]').fill(String(amount))
+  await page.locator('[data-testid="auction-place-bid"]').click()
 }
 
 // ── Student / dashboard URLs (DEV bypasses) ─────────────────────────────────────
@@ -656,11 +680,12 @@ async function main() {
   const noDealMembers   = membersOf(noDealGid)
   const bidderIndexOf   = pid => byPid[pid]?.bidderIndex
 
-  // ══════════════════ SLICE 3 — LIVE AUCTION (server side) ══════════════════
+  // ══════════════ SLICE 4 — LIVE AUCTION, driven through the REAL bidding UI ══════════════
+  // Every student bid below is a real fill-field + click-Place-bid on the student's own
+  // browser (the Slice 3 harness poked submitBid directly; those calls are GONE). The
+  // instructor Start/Close are the real dashboard buttons.
   banner('Live auction — Start button + STORED duration override (60s, not 600)')
 
-  // Config-override: instructor saves duration_seconds=60 in Settings, THEN starts
-  // the happy group's auction via the REAL dashboard button.
   await saveAuctionSettings(dash, 60, 1)
   await dash.goto(dashboardUrl())
   await dash.waitForSelector('h1:has-text("Instructor Dashboard — eBay")', { timeout: 30_000 })
@@ -672,8 +697,136 @@ async function main() {
   assert(Math.abs(span - 60_000) <= 3_000,
     `Auction — endsAtMs reflects the STORED duration override 60s, not 600 (span=${span}ms)`)
 
-  // Guard: an auction cannot start while any member is un-endowed. Deterministic —
-  // null one member's endowment, assert the start is rejected, then restore it verbatim.
+  // Map the happy group's students by bidderIndex (expert = 1). uiBidderIndexOf drives
+  // "the student holding index k" — its page shows k's private view.
+  const happyByIdx = {}
+  for (const m of happyMembers) happyByIdx[byPid[m.pid]?.bidderIndex] = m
+  const B1 = happyByIdx[1], B2 = happyByIdx[2], B3 = happyByIdx[3], B4 = happyByIdx[4]
+  assert(B1 && B2 && B3 && B4, `Auction UI — happy group has bidders 1..4 to drive (got [${Object.keys(happyByIdx).sort().join(',')}])`)
+
+  // Every happy student's browser flips from group-reveal to the live bidding screen.
+  banner('Live auction UI — every student reaches the bidding screen; clock counts down')
+  const reached = await Promise.all(happyMembers.map(m => waitAuctionScreen(m.page).then(() => true).catch(() => false)))
+  assert(reached.every(Boolean), `Auction UI — all ${happyMembers.length} students reach the live bidding screen after Start`)
+
+  // Clock counts down from the STORED 60s (cosmetic, server-clock offset). Read it twice.
+  const clock0 = await B1.page.locator('[data-testid="auction-clock"]').innerText()
+  await sleep(1500)
+  const clock1 = await B1.page.locator('[data-testid="auction-clock"]').innerText()
+  const toSecs = t => { const [m, s] = t.split(':').map(Number); return m * 60 + s }
+  const s0 = toSecs(clock0), s1 = toSecs(clock1)
+  assert(Number.isFinite(s0) && Number.isFinite(s1) && s1 < s0 && s0 >= 1 && s0 <= 60,
+    `Auction UI — clock counts DOWN from the 60s server deadline (${clock0} → ${clock1})`)
+
+  // ── Private-info panel per role + the CROWN JEWEL: no non-expert ever sees 2650 ──
+  banner('Live auction UI — private-info panel per role; NO non-expert sees the expert value (2650)')
+  const expertBody = await bodyText(B1.page)
+  assert(/expert/i.test(expertBody) && expertBody.includes('$2,650') && /exactly/i.test(expertBody),
+    `Auction UI — the EXPERT (bidder 1) sees "$2,650 … exactly" in their private info`)
+
+  // Each non-expert sees their OWN signal + the ±1000 statement + their own use value,
+  // and their DOM contains NO "2650" in any form. (Skip index 5, whose OWN signal is
+  // legitimately 2650 — the leak we guard against is the EXPERT's exact value reaching
+  // someone whose own signal is not 2650.)
+  let noLeak = true, leakWho = ''
+  for (const idx of [2, 3, 4]) {
+    const m = happyByIdx[idx]; if (!m) continue
+    const t = await bodyText(m.page)
+    const ownOk = t.includes(dollars(EBAY_SIGNAL[idx])) && t.includes('$1,000') && t.includes(dollars(EBAY_USE[idx]))
+    const clean = !t.includes('2650') && !t.includes('2,650')
+    if (!ownOk || !clean) { noLeak = false; leakWho = `bidder ${idx} (ownOk=${ownOk}, clean=${clean})` }
+  }
+  assert(noLeak, `Auction UI — every non-expert sees their OWN signal + ±$1,000 + own use value, and NEVER 2650 ${leakWho}`)
+
+  // ── Status line + one-row-per-bid history + no losing max + personal messages ──
+  banner('Live auction UI — sequential bids: status flips, history rows, no-leak (109/110), messages')
+
+  // Pre-bid: nobody is winning; the status says so plainly.
+  const pre = await B1.page.locator('[data-testid="auction-status"]').getAttribute('data-winning')
+  assert(pre === 'none', `Auction UI — before any bid the status is "No bids yet" (data-winning=${pre})`)
+
+  // Bid 1 — expert bids 109 (first bid sits at the $0 starting price; expert now leads).
+  await uiBid(B1.page, 109)
+  await pollAuction(happyGid, a => a?.highBidderIndex === 1, 10_000)
+  await B1.page.waitForSelector('[data-testid="auction-status"][data-winning="true"]', { timeout: 10_000 })
+  await B2.page.waitForSelector('[data-testid="auction-status"][data-winning="false"]', { timeout: 10_000 })
+  assert(true, `Auction UI — status flips: bidder 1 "WINNING", bidder 2 "NOT WINNING" after the first bid`)
+  assert((await historyRows(B1.page)) === 1, `Auction UI — one row after 1 submitted bid`)
+
+  // Bid 2 — bidder 2 bids 150 → overtakes at $110 (= 109 + increment). The LOSING max
+  // 109 must never render; bidder 1 gets the honest "at least $109" outbid sentence.
+  await uiBid(B2.page, 150)
+  await pollAuction(happyGid, a => a?.currentAmount === 110 && a?.highBidderIndex === 2, 10_000)
+  await B2.page.waitForSelector('[data-testid="auction-status"][data-winning="true"]', { timeout: 10_000 })
+  // 109 (bidder 1's exhausted max) appears NOWHERE on any OTHER bidder's screen.
+  let no109 = true
+  for (const m of [B2, B3, B4]) if ((await bodyText(m.page)).includes('109')) no109 = false
+  assert(no109, `Auction UI — the losing max 109 renders NOWHERE (only the $110 price shows) — the old two-row leak is gone`)
+  // The personal outbid message on bidder 1's screen, with the lower-bound wording.
+  await B1.page.waitForSelector('[data-testid="auction-message"][data-kind="outbid"]', { timeout: 10_000 })
+  const outbidTxt = await B1.page.locator('[data-testid="auction-message"]').innerText()
+  assert(/outbid/i.test(outbidTxt) && outbidTxt.includes('Bidder 2') && outbidTxt.includes('$110') && outbidTxt.includes('at least $109'),
+    `Auction UI — outbid message names the leader + price + honest lower bound ("${outbidTxt.replace(/\s+/g, ' ').trim()}")`)
+  assert((await historyRows(B1.page)) === 2, `Auction UI — two rows after 2 submitted bids`)
+
+  // Bid 3 — bidder 3 bids 130 (below bidder 2's max 150) → incumbent holds, proxy raises
+  // to $131. Bidder 2 sees the "defended" message; three bids → three rows.
+  await uiBid(B3.page, 130)
+  await pollAuction(happyGid, a => a?.currentAmount === 131 && a?.highBidderIndex === 2, 10_000)
+  await B2.page.waitForSelector('[data-testid="auction-message"][data-kind="defended"]', { timeout: 10_000 })
+  const defTxt = await B2.page.locator('[data-testid="auction-message"]').innerText()
+  assert(defTxt.includes('$131') && /still winning/i.test(defTxt),
+    `Auction UI — "defended" message: proxy raised your bid to $131, still winning ("${defTxt.replace(/\s+/g, ' ').trim()}")`)
+  assert((await historyRows(B2.page)) === 3, `Auction UI — exactly 3 rows after 3 submitted bids (one row per bid, no cascade)`)
+
+  // Raise-only — bidder 3 tries 130 again (≤ own previous max) → rejected with a clear message.
+  await uiBid(B3.page, 130)
+  await B3.page.waitForSelector('[data-testid="auction-error"]', { timeout: 10_000 })
+  const rrErr = await B3.page.locator('[data-testid="auction-error"]').innerText()
+  assert(/higher than your previous/i.test(rrErr),
+    `Auction UI — raise-only: a bid ≤ your own previous max is rejected ("${rrErr.replace(/\s+/g, ' ').trim()}")`)
+  assert((await historyRows(B3.page)) === 3, `Auction UI — the rejected raise adds NO history row (still 3)`)
+
+  // Fat-finger — bidder 4 fat-fingers 26500 (>2× current AND ≥ $10,000) → confirmation
+  // fires; Cancel does NOT submit and keeps the typed value intact.
+  banner('Live auction UI — fat-finger guard: >2× current & ≥$10,000 → confirm; Cancel does not submit')
+  await B4.page.locator('[data-testid="auction-max-input"]').fill('26500')
+  await B4.page.locator('[data-testid="auction-place-bid"]').click()
+  await B4.page.waitForSelector('[data-testid="auction-confirm-dialog"]', { timeout: 8_000 })
+  const dlgTxt = await B4.page.locator('[data-testid="auction-confirm-dialog"]').innerText()
+  assert(dlgTxt.includes('26,500') && /binding/i.test(dlgTxt),
+    `Auction UI — fat-finger confirmation shows the $26,500 amount + "binding" warning`)
+  await B4.page.locator('[data-testid="auction-confirm-cancel"]').click()
+  await B4.page.waitForSelector('[data-testid="auction-confirm-dialog"]', { state: 'detached', timeout: 8_000 })
+  const b4Val = await B4.page.locator('[data-testid="auction-max-input"]').inputValue()
+  const afterCancel = await readAuction(happyGid)
+  assert(b4Val === '26500' && afterCancel?.currentAmount === 131 && (await historyRows(B4.page)) === 3,
+    `Auction UI — Cancel does NOT submit: price stays $131, no new row, field keeps 26500`)
+
+  // ── Concurrency THROUGH THE UI: 4 simultaneous real clicks settle on one price ──
+  banner('Live auction UI — 4 simultaneous UI bids → exact proxy price 3001, no lost updates')
+  const CMAXES = [1000, 2000, 3000, 5000]      // all < $10,000 floor → no fat-finger dialog
+  await Promise.all([uiBid(B1.page, 1000), uiBid(B2.page, 2000), uiBid(B3.page, 3000), uiBid(B4.page, 5000)])
+  const aConc = await pollAuction(happyGid, a => a?.currentAmount === 3001, 20_000)
+  assert(aConc?.currentAmount === 3001,
+    `Auction concurrency (UI) — 4 simultaneous bids settle at the exact proxy price 3001 (got ${aConc?.currentAmount})`)
+  assert(aConc?.highBidderIndex === 4,
+    `Auction concurrency (UI) — high bidder is the top-max bidder (index 4), no lost update (got ${aConc?.highBidderIndex})`)
+
+  // No confidential max — neither the concurrency maxes nor the sequential ones — appears
+  // anywhere in the RTDB subtree the client can read.
+  const FORBIDDEN = new Set([1000, 2000, 3000, 5000, 109, 150, 130])
+  const leaked = numericLeaves(await readAuction(happyGid)).filter(v => FORBIDDEN.has(v))
+  assert(leaked.length === 0,
+    `Auction — NO confidential max appears anywhere under auctions/${happyGid} (leaked: [${leaked.join(',')}])`)
+
+  // Close the happy auction via the real button → students fall back to normal routing.
+  await dash.locator(`[data-testid="close-auction-${happyGid}"]`).click()
+  const aClosed = await pollAuction(happyGid, a => a?.status === 'closed', 10_000)
+  assert(aClosed?.status === 'closed', `Auction — Close button closes the auction (status=${aClosed?.status})`)
+
+  // ── Guard: an auction cannot start while any member is un-endowed (server, via the
+  // Start button). Null one noDeal member's endowment, click Start, assert rejection. ──
   banner('Live auction — startAuction guard (no start before endowments land)')
   const guardPid = noDealMembers[0].pid
   const guardRaw = (await fsGetDoc(`participants/${guardPid}`))?.fields?.auction_endowment ?? null
@@ -683,42 +836,30 @@ async function main() {
   assert((await readAuction(noDealGid)) == null, `Auction guard — no auction node created for the un-ready group`)
   await patchEndowment(guardPid, guardRaw)   // restore verbatim
 
-  // Concurrency: 4 simultaneous bids must settle to the EXACT sequential-proxy result.
-  banner('Live auction — 4 simultaneous bids → exact proxy price, no lost updates')
-  const cMembers = happyMembers.slice(0, 4)
-  const CMAXES = [1000, 2000, 3000, 5000]      // well-separated → no derived value equals a max
-  const winnerPid = cMembers[3].pid            // the top max (5000)
-  await Promise.all(cMembers.map((m, i) => submitBidFn(m.pid, happyGid, CMAXES[i])))
-  const aConc = await pollAuction(happyGid, a => a?.currentAmount === 3001, 15_000)
-  assert(aConc?.currentAmount === 3001,
-    `Auction concurrency — 4 simultaneous bids settle at the exact proxy price 3001 (got ${aConc?.currentAmount})`)
-  assert(aConc?.highBidderIndex === bidderIndexOf(winnerPid),
-    `Auction concurrency — high bidder is the top-max bidder, no lost update (got ${aConc?.highBidderIndex}, expect ${bidderIndexOf(winnerPid)})`)
-
-  // No confidential max anywhere in the RTDB subtree.
-  const leaked = numericLeaves(await readAuction(happyGid)).filter(v => new Set(CMAXES).has(v))
-  assert(leaked.length === 0,
-    `Auction — NO confidential max appears anywhere under auctions/${happyGid} (leaked: [${leaked.join(',')}])`)
-
-  // Close via the real button.
-  await dash.locator(`[data-testid="close-auction-${happyGid}"]`).click()
-  const aClosed = await pollAuction(happyGid, a => a?.status === 'closed', 10_000)
-  assert(aClosed?.status === 'closed', `Auction — Close button closes the auction (status=${aClosed?.status})`)
-
-  // Sniping: the SERVER clock owns the deadline. A bid after endsAtMs is rejected even
-  // with the client clock faked backward in the payload (the callable reads no client time).
-  banner('Live auction — SNIPING: late bid rejected, server clock is the only truth')
-  await saveAuctionSettings(dash, 2, 1)                       // 2-second auctions from here
-  await dash.goto(dashboardUrl())                             // restore the dashboard page off /settings
-  const snipeStart = await startAuctionFn(deadlockGid)
-  assert(snipeStart.ok, `Auction sniping — short auction started (endsAtMs ${snipeStart.result?.endsAtMs})`)
-  await sleep(2600)                                            // let the SERVER clock pass endsAtMs
-  const fakeEarly = Date.now() - 10_000_000                    // "it's still early!" — a faked client clock
-  const snipeRes = await submitBidFn(deadlockMembers[0].pid, deadlockGid, 2500, { client_now_ms: fakeEarly })
-  assert(!snipeRes.ok,
-    `Auction SNIPING — a bid after the server deadline is REJECTED; faked client clock ignored (status=${snipeRes.status})`)
-  assert((await readAuction(deadlockGid))?.status === 'closed',
-    `Auction sniping — the late bid implicitly CLOSED the auction`)
+  // ── SNIPING through the UI: the SERVER clock owns the deadline. When it hits zero the
+  // client (computed from the server's endsAtMs + offset) stops the clock, disables
+  // bidding, and shows "Auction closed" — the student cannot snipe. ──
+  banner('Live auction UI — SNIPING: at the server deadline the bid controls vanish, no late bid')
+  await saveAuctionSettings(dash, 6, 1)                       // 6-second auction (long enough to render while open)
+  await dash.goto(dashboardUrl())                            // restore the dashboard page off /settings
+  await dash.waitForSelector(`[data-testid="start-auction-${deadlockGid}"]`, { timeout: 30_000 })
+  await dash.locator(`[data-testid="start-auction-${deadlockGid}"]`).click()
+  const snipe0 = await pollAuction(deadlockGid, a => a?.status === 'open', 15_000)
+  assert(snipe0?.status === 'open', `Auction sniping — short 6s auction opened (endsAtMs ${snipe0?.endsAtMs})`)
+  const snipeStu = deadlockMembers[0]
+  await waitAuctionScreen(snipeStu.page)
+  // While open, the student CAN bid (control present).
+  const openHasInput = await snipeStu.page.locator('[data-testid="auction-place-bid"]').count()
+  assert(openHasInput === 1, `Auction sniping — while OPEN the Place-bid control is present`)
+  // Let the SERVER deadline pass; the client clock (server-offset) hits zero on its own.
+  await snipeStu.page.waitForSelector('[data-testid="auction-closed"]', { timeout: 12_000 })
+  const clockZero = await snipeStu.page.locator('[data-testid="auction-clock"]').innerText()
+  const noBidControl = await snipeStu.page.locator('[data-testid="auction-place-bid"]').count()
+  assert(clockZero === '0:00' && noBidControl === 0,
+    `Auction SNIPING (UI) — at the deadline the clock stops at 0:00 and the bid control is GONE — no late bid possible (clock=${clockZero}, controls=${noBidControl})`)
+  // Close server-side so the deadlock group returns to normal routing for its outcome flow.
+  await dash.locator(`[data-testid="close-auction-${deadlockGid}"]`).click()
+  await pollAuction(deadlockGid, a => a?.status === 'closed', 10_000)
 
   // ── (6) Happy group: a `price` deal, accepted + persisted ──────────────────
   banner(`Outcome — happy group: price ${HAPPY_PRICE} deal`)

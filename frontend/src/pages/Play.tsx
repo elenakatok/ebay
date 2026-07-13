@@ -1,8 +1,11 @@
 import React, { useEffect, useState } from 'react'
-import { doc, getDoc } from 'firebase/firestore'
+import { doc, getDoc, onSnapshot } from 'firebase/firestore'
 import { httpsCallable } from 'firebase/functions'
 import { auth, db, rtdb, functions } from '../firebase'
-import { assignRole, confirmReady, verifyAttendanceCode, CLASSROOM_URL } from '../api'
+import { assignRole, confirmReady, verifyAttendanceCode, submitBid, CLASSROOM_URL } from '../api'
+import AuctionBidding from '../auction/AuctionBidding'
+import { useAuctionNode } from '../auction/useAuctionNode'
+import { ebayAuctionLabels, ebayBidderLabel, ebayPrivateInfo, EBAY_CONFIRM, type EbayEndowment } from '../ebayAuctionLabels'
 import {
   useStudentSession,
   KnowledgeCheck,
@@ -121,6 +124,44 @@ function formatEbayOutcome(
   )
 }
 
+// ── Live-auction overlay (Slice 4) ────────────────────────────────────────────
+// Subscribes to the student's OWN participant doc (group_id + endowment), the group
+// doc (static bidder count), and the group's RTDB auction node. When the instructor
+// opens the auction, `active` flips true and the bidding screen takes over the phase
+// UI — until the auction is no longer open, when normal routing resumes.
+
+function useEbayAuction(iid: string | null, pid: string | null) {
+  const [groupId, setGroupId]     = useState<string | null>(null)
+  const [endowment, setEndowment] = useState<EbayEndowment | null>(null)
+  const [numBidders, setNumBidders] = useState(0)
+
+  useEffect(() => {
+    if (!iid || !pid) return
+    const off = onSnapshot(doc(db, 'game_instances', iid, 'participants', pid), snap => {
+      const d = snap.data() ?? {}
+      setGroupId(typeof d.group_id === 'string' && d.group_id ? d.group_id : null)
+      const e = d.auction_endowment
+      if (e && typeof e.bidderIndex === 'number') setEndowment(e as EbayEndowment)
+    })
+    return () => off()
+  }, [iid, pid])
+
+  useEffect(() => {
+    if (!iid || !groupId) return
+    const off = onSnapshot(doc(db, 'game_instances', iid, 'groups', groupId), snap => {
+      const arr = snap.data()?.bidder_participants
+      if (Array.isArray(arr)) setNumBidders(arr.length)
+    })
+    return () => off()
+  }, [iid, groupId])
+
+  const { live, serverOffsetMs } = useAuctionNode(rtdb, iid, groupId)
+  return {
+    active: live?.status === 'open',
+    live, serverOffsetMs, endowment, numBidders, groupId,
+  }
+}
+
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export default function Play() {
@@ -152,6 +193,11 @@ export default function Play() {
       }
     },
   })
+
+  // Live-auction overlay — driven independently of the phase machine (RTDB).
+  const sessIid = session.kind === 'ready' ? session.gameInstanceId : null
+  const sessPid = session.kind === 'ready' ? session.participantId  : null
+  const auction = useEbayAuction(sessIid, sessPid)
 
   // ── Phase routing + header-link population ────────────────────────────────
 
@@ -222,6 +268,28 @@ export default function Play() {
   }
 
   const { participantId, gameInstanceId } = session
+
+  // ── Live-auction overlay: takes over the screen whenever the auction is OPEN ──
+  if (auction.active && auction.live && auction.endowment && auction.groupId) {
+    const gid = auction.groupId
+    return (
+      <div style={{ fontFamily: typography.fontFamily }}>
+        <GameHeader studentLinks={headerLinks} />
+        <AuctionBidding
+          labels={ebayAuctionLabels}
+          direction="ascending"
+          live={auction.live}
+          myBidderIndex={auction.endowment.bidderIndex}
+          numBidders={auction.numBidders}
+          serverOffsetMs={auction.serverOffsetMs}
+          privateInfo={ebayPrivateInfo(auction.endowment)}
+          bidderLabel={ebayBidderLabel}
+          confirm={EBAY_CONFIRM}
+          onPlaceBid={(maxAmount) => submitBid({}, gid, maxAmount).then(() => {})}
+        />
+      </div>
+    )
+  }
 
   // ── P2 inline handlers ────────────────────────────────────────────────────
 
