@@ -1146,35 +1146,33 @@ async function main() {
   assert(kcOf(NOSHOW_PID) === 1,
     `KC score — the no-show completed KC before leaving: score 1.0 still rides to the gradebook (got ${kcOf(NOSHOW_PID)})`)
 
-  // ══════════════════ SLICE 7d — INSTRUCTOR DASHBOARD ══════════════════
-  // Start Auction at the TOP (above the roster); the auction OUTCOME per student is
-  // Won / Lost / No bid — NEVER "+1" (a grading internal) and NEVER "Absent" for a present
-  // non-bidder. (The shared roster's own "Outcome" column still shows raw_score — that is
-  // hard-coded shared game-ui and cannot be changed from eBay's side; this eBay panel
-  // surfaces the real game outcome instead.)
-  banner('Slice 7d — dashboard: Start Auction at the TOP; per-student Won/Lost/No bid (never +1, never Absent)')
+  // ══════════════════ SLICE 7d/8 — INSTRUCTOR DASHBOARD ══════════════════
+  // Start Auction stays at the TOP (above the roster). Slice 8: the per-student
+  // Won/Lost/No bid table was REMOVED from this panel — it duplicated the shared roster
+  // (two rosters on one page). The panel is now a slim control strip only: Start Auction +
+  // live per-group status. Per-student outcome now lives in Report 3 (/reports).
+  banner('Slice 7d/8 — dashboard: Start Auction at the TOP; per-student outcome table REMOVED (one roster)')
   await dash.goto(dashboardUrl())
   await dash.waitForSelector('h1:has-text("Instructor Dashboard — eBay")', { timeout: 30_000 })
   await dash.waitForSelector('[data-testid="auction-controls"]', { timeout: 30_000 })
-  // Panel populates from getReportData — wait for a resolved outcome chip.
-  await dash.waitForSelector('[data-testid="dash-member-outcome"][data-outcome="Won"]', { timeout: 20_000 })
+  // Panel populates from getReportData — wait for a resolved per-group status line.
+  await dash.waitForSelector('[data-testid^="auction-result-"]', { timeout: 20_000 })
 
-  // Fix 1 — the auction panel (Start Auction lived here) sits ABOVE the roster (top of page).
+  // Fix 1 (unchanged) — the auction panel (Start Auction lives here) sits ABOVE the roster.
   const panelBox  = await dash.locator('[data-testid="auction-controls"]').boundingBox()
   const rosterBox = await dash.locator('table').first().boundingBox()
   assert(panelBox && rosterBox && panelBox.y < rosterBox.y,
     `7d — the Start-Auction / auction panel sits ABOVE the roster (panel.y=${Math.round(panelBox?.y ?? -1)} < roster.y=${Math.round(rosterBox?.y ?? -1)})`)
 
-  // Fix 2 — per-student GAME outcome chips: Won / Lost / No bid; NEVER "Absent"/"+1".
-  const chips = await dash.locator('[data-testid="dash-member-outcome"]').evaluateAll(els => els.map(e => e.getAttribute('data-outcome')))
-  const chipSet = new Set(chips)
-  assert(chipSet.has('Won') && chipSet.has('Lost') && chipSet.has('No bid'),
-    `7d — the dashboard shows the GAME outcome per student: Won / Lost / No bid [${[...chipSet].join(', ')}]`)
-  assert(!chips.includes('Absent') && !chips.includes('+1') && !chips.includes('1'),
-    `7d — no chip reads "Absent" or "+1" (the participation internal never leaks into the auction outcome)`)
-  const nsChips = await dash.locator(`[data-testid="auction-row-${nsGid}"] [data-testid="dash-member-outcome"]`).evaluateAll(els => els.map(e => e.getAttribute('data-outcome')))
-  assert(nsChips.length === nsMembers.length && nsChips.every(c => c === 'No bid'),
-    `7d — the no-sale group's present non-bidders all show "No bid" (present, NOT Absent) [${nsChips.join(',')}]`)
+  // Slice 8 — the per-student outcome table is GONE: no Won/Lost/No bid chip renders on the
+  // dashboard, so there is exactly ONE roster (the shared one). The instructor reads
+  // per-student Won/Lost/No bid from Report 3 instead (asserted in the 7e block below).
+  const chipCount = await dash.locator('[data-testid="dash-member-outcome"]').count()
+  assert(chipCount === 0,
+    `8 — the per-student outcome table is REMOVED from the dashboard (dash-member-outcome chips = ${chipCount})`)
+  const rosterCount = await dash.locator('table').count()
+  assert(rosterCount === 1,
+    `8 — exactly ONE roster renders on the dashboard (tables = ${rosterCount})`)
 
   // ══════════════════ SLICE 7e — THE THREE REPORTS ══════════════════
   banner('Slice 7e — three reports: group summary, price-over-time chart, per-student profit')
@@ -1220,6 +1218,12 @@ async function main() {
     `Report 3 — profit is explicitly NOT a grade (the report labels the distinction), and profit is never titled "Score"`)
   assert(!/NaN|undefined|Bidder null/.test(studentBody),
     `Report 3 — no NaN / undefined leftovers for a resolved auction`)
+  // Slice 8 — the per-student Won/Lost/No bid outcome now lives HERE (relocated off the
+  // dashboard). Confirm the "Outcome" column carries it so no information was lost.
+  const outcomeVals = await dash.locator('[data-testid="student-report"] table tbody tr td:nth-child(5)').allInnerTexts().catch(() => [])
+  const outcomeText = outcomeVals.join(' | ')
+  assert(/Won/.test(studentBody) && /Lost/.test(studentBody) && /No bid/.test(studentBody),
+    `8 — Report 3 shows the per-student outcome (Won/Lost/No bid) relocated from the dashboard [${outcomeText.slice(0, 60)}]`)
 }
 
 // ── Entry point ─────────────────────────────────────────────────────────────────

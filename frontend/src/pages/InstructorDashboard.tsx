@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { InstructorDashboard as SharedDashboard } from '@mygames/game-ui'
 import { auth, functions, rtdb } from '../firebase'
 import { ebayConfig } from '../gameConfig'
-import { startAuction, getReportData, type GroupReport, type MemberOutcome } from '../api'
+import { startAuction, getReportData, type GroupReport } from '../api'
 
 const roleLabels = Object.fromEntries(
   ebayConfig.roles.map(r => [r.key, r.label])
@@ -13,32 +13,20 @@ const roleLabels = Object.fromEntries(
 // renders (it's multi-round only) and the fixed action bar exposes no slot — so the
 // per-group Start Auction controls cannot be injected INTO the shared top bar without a
 // game-ui change (deny-listed). Instead this eBay-local panel is rendered ABOVE the
-// shared dashboard, giving the Start Auction controls the TOP position (spec §7d Fix 1),
-// alongside the auction OUTCOME per student (Won / Lost / No bid — spec §7d Fix 2).
+// shared dashboard, giving the Start Auction controls the TOP position (spec §7d Fix 1).
+//
+// This panel is a slim CONTROL strip only: per-group Start Auction + live auction status.
+// It intentionally does NOT list per-student Won/Lost/No bid — that duplicated the shared
+// roster (two rosters on one page, Slice 8). The instructor gets per-student outcome from
+// Report 3 (the /reports page) instead.
 //
 // NOTE on the shared roster's "Outcome" column: it renders participant.raw_score (the flat
 // participation point, "+1") and is hard-coded in shared game-ui RosterTable — it cannot be
-// changed from eBay's side without a shared-package edit. This panel surfaces the REAL game
-// outcome (Won/Lost/No bid) instead; the roster's generic column is left as the shared
-// component ships it.
+// changed from eBay's side without a shared-package edit. It is intentionally left as the
+// shared component ships it (accepted; a future shared slice adds an outcome-renderer override).
 
-const OUTCOME_STYLE: Record<MemberOutcome, React.CSSProperties> = {
-  'Won':    { background: '#e6f4ea', color: '#137333', border: '1px solid #a8d5b5' },
-  'Lost':   { background: '#f1f3f4', color: '#5f6368', border: '1px solid #dadce0' },
-  'No bid': { background: '#fef7e0', color: '#8a6d00', border: '1px solid #f0d98a' },
-  '—':      { background: 'transparent', color: '#9aa0a6', border: '1px solid #e0e0e0' },
-}
 const money = (n: number) => '$' + Math.round(n).toLocaleString('en-US')
 const signedMoney = (n: number) => (n < 0 ? '−$' + Math.abs(Math.round(n)).toLocaleString('en-US') : '$' + Math.round(n).toLocaleString('en-US'))
-
-function OutcomeChip({ outcome }: { outcome: MemberOutcome }) {
-  return (
-    <span data-testid="dash-member-outcome" data-outcome={outcome}
-      style={{ ...OUTCOME_STYLE[outcome], fontSize: '0.78rem', fontWeight: 600, padding: '0.1rem 0.5rem', borderRadius: 10, whiteSpace: 'nowrap' }}>
-      {outcome}
-    </span>
-  )
-}
 
 function EbayAuctionPanel() {
   const [groups, setGroups] = useState<GroupReport[]>([])
@@ -104,18 +92,6 @@ function EbayAuctionPanel() {
               )}
 
               {msg[g.group_id] && <span style={{ fontSize: '0.85rem', color: '#555' }}>{msg[g.group_id]}</span>}
-
-              {/* Per-student GAME outcome (never a grade) — Won / Lost / No bid */}
-              {g.members.length > 0 && (
-                <div style={{ display: 'flex', gap: '0.4rem', flexWrap: 'wrap', marginLeft: 'auto' }}>
-                  {g.members.map(m => (
-                    <span key={m.participant_id} style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3rem', fontSize: '0.8rem' }}>
-                      <span style={{ color: '#5f6368' }}>{m.name}</span>
-                      <OutcomeChip outcome={m.outcome} />
-                    </span>
-                  ))}
-                </div>
-              )}
             </div>
           )
         })}
@@ -127,7 +103,7 @@ function EbayAuctionPanel() {
 export default function InstructorDashboard() {
   return (
     <>
-      {/* Auction controls + outcomes at the TOP (spec §7d). */}
+      {/* Auction controls at the TOP (spec §7d; per-student outcomes removed in Slice 8). */}
       <EbayAuctionPanel />
       <SharedDashboard
         title="Instructor Dashboard — eBay"
