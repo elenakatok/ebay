@@ -41,6 +41,16 @@ service cloud.firestore {
       allow write: if false;
     }
 
+    // Per-group TRUTH (auction vCommon) — server-only. This is the entire
+    // pedagogical point: the common value must never reach a client before
+    // results. Denied to every client here (admin SDK bypasses rules).
+    // NOTE: rules do NOT cascade into subcollections, so the group read rule
+    // above does NOT expose this — but we deny explicitly so intent is enforced,
+    // not merely conventional.
+    match /game_instances/{instanceId}/groups/{groupId}/truth/{doc} {
+      allow read, write: if false;
+    }
+
     // Default deny for everything else.
     match /{document=**} {
       allow read, write: if false;
