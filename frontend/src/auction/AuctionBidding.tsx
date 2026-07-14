@@ -14,7 +14,7 @@
 // server owns the real deadline.
 // ═══════════════════════════════════════════════════════════════════════════════
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 
 // ── Generic shapes (no domain vocabulary) ──────────────────────────────────────
 
@@ -88,6 +88,21 @@ export interface AuctionBiddingProps {
 
 const money = (n: number) => '$' + Math.round(n).toLocaleString('en-US')
 
+// The standing price at which `me` most recently TOOK the lead — a transition from another
+// bidder (or from no bids) to `me`. Defended steps record the INCUMBENT's own index at a
+// RAISED amount (bidEngine), so they do NOT reset this; only a genuine lead change does.
+// Returns null if `me` never appears as high bidder. Pure over live history — no capture.
+function takeLeadAmount(history: AuctionHistoryRow[], me: number): number | null {
+  const rows = [...history].sort((a, b) => a.atMs - b.atMs)
+  let leadAmount: number | null = null
+  let prevHigh: number | null = null
+  for (const row of rows) {
+    if (row.bidderIndex === me && prevHigh !== me) leadAmount = row.amount
+    prevHigh = row.bidderIndex
+  }
+  return leadAmount
+}
+
 function mmss(msLeft: number): string {
   const s = Math.max(0, Math.ceil(msLeft / 1000))
   const m = Math.floor(s / 60)
@@ -126,29 +141,30 @@ export default function AuctionBidding(props: AuctionBiddingProps) {
   const statusText = noBids ? labels.noBids : amWinning ? labels.winning : labels.notWinning
   const statusColor = noBids ? '#555' : amWinning ? '#137333' : '#c5221f'
 
-  // Personal event message — derived purely from PUBLIC transitions (never a max).
-  const prev = useRef<{ high: number | null; amount: number } | null>(null)
-  const [message, setMessage] = useState<{ kind: string; text: string } | null>(null)
-  useEffect(() => {
-    const cur = { high: live.highBidderIndex, amount: live.currentAmount }
-    const p = prev.current
-    if (p) {
-      if (p.high === myBidderIndex && cur.high !== myBidderIndex && cur.high !== null) {
-        // Overtaken. The honest lower bound on the leader's max is currentAmount −
-        // increment (i.e. your own beaten max): all the price reveals is that they
-        // beat you — not how much more they'd pay.
-        const lb = cur.amount - live.increment
-        setMessage({ kind: 'outbid', text: labels.msgOutbid(bidderLabel(cur.high), cur.amount, lb) })
-      } else if (cur.high === myBidderIndex && p.high === myBidderIndex && cur.amount > p.amount) {
-        // Still winning, but a competitor pushed my proxy up (I can't self-raise the
-        // price while leading, so a rise while I lead means someone else bid).
-        setMessage({ kind: 'defended', text: labels.msgDefended(cur.amount) })
-      } else if (cur.high === myBidderIndex && p.high !== myBidderIndex) {
-        setMessage({ kind: 'lead', text: labels.msgTookLead(cur.amount) })
-      }
+  // Personal STATUS message — DERIVED from live state on EVERY render, never captured at
+  // event time. This box describes where the viewer stands RIGHT NOW; freezing it at the
+  // moment of an outbid teaches a false fact once the price moves on (e.g. it kept claiming
+  // "leader's max ≥ $1,500" while the live price had climbed to $3,101). currentAmount,
+  // highBidderIndex and history all arrive live from the RTDB node — no useState/useRef,
+  // no extra listener or timer; this DELETES the capture rather than adding state.
+  const message: { kind: string; text: string } | null = (() => {
+    if (noBids) return null
+    if (!amWinning) {
+      // Not winning (someone else leads, or I never bid). The honest lower bound on the
+      // leader's max is the CURRENT standing price minus one increment: all the price
+      // reveals is that they beat the prior standing — not how much more they would pay.
+      const lb = live.currentAmount - live.increment
+      return { kind: 'outbid', text: labels.msgOutbid(bidderLabel(live.highBidderIndex as number), live.currentAmount, lb) }
     }
-    prev.current = cur
-  }, [live.currentAmount, live.highBidderIndex])   // eslint-disable-line react-hooks/exhaustive-deps
+    // Winning. "Defended" (a competitor pushed my proxy up) iff the price has risen above the
+    // amount at which I most recently TOOK the lead — read from live.history (itself re-derived
+    // from the node each render, not frozen). Otherwise nobody has challenged since.
+    const lead = takeLeadAmount(live.history, myBidderIndex)
+    const defended = lead !== null && live.currentAmount > lead
+    return defended
+      ? { kind: 'defended', text: labels.msgDefended(live.currentAmount) }
+      : { kind: 'lead', text: labels.msgTookLead(live.currentAmount) }
+  })()
 
   // Place-bid form.
   const [bidText, setBidText] = useState('')

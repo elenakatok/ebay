@@ -72,8 +72,11 @@ export const ebayAuctionLabels: AuctionLabels = {
   historyCols: { bidder: 'Bidder', bid: 'Bid', time: 'Time' },
   msgTookLead: (amount) => `You are winning at ${money(amount)}.`,
   msgDefended: (amount) => `A competing bid raised your bid to ${money(amount)}. You are still winning.`,
+  // Status, not a notification: this is recomputed from the LIVE price every render, so it
+  // leads with "You are not winning" (a standing state) rather than "You were outbid" (a
+  // past event). The lower bound (current price − one increment) is the load-bearing lesson.
   msgOutbid: (leaderLabel, amount, lowerBound) =>
-    `You were outbid. ${leaderLabel} is winning at ${money(amount)}. ` +
+    `You are not winning. ${leaderLabel} is winning at ${money(amount)}. ` +
     `Their maximum is at least ${money(lowerBound)} — you don't know how much more.`,
 }
 

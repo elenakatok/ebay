@@ -860,15 +860,20 @@ async function main() {
   await uiBid(B2.page, 150)
   await pollAuction(happyGid, a => a?.currentAmount === 110 && a?.highBidderIndex === 2, 10_000)
   await B2.page.waitForSelector('[data-testid="auction-status"][data-winning="true"]', { timeout: 10_000 })
-  // 109 (bidder 1's exhausted max) appears NOWHERE on any OTHER bidder's screen.
-  let no109 = true
-  for (const m of [B2, B3, B4]) if ((await bodyText(m.page)).includes('109')) no109 = false
-  assert(no109, `Auction UI — the losing max 109 renders NOWHERE (only the $110 price shows) — the old two-row leak is gone`)
+  // 109 (bidder 1's exhausted max) must never appear as a HISTORY ROW — that was the old
+  // two-row leak (history recording the beaten max as its own row). Note: 109 DOES now
+  // legitimately appear as the public lower bound (price − increment = 110 − 1) in a
+  // not-winning bidder's DERIVED status box — that is intended second-price information
+  // (anyone can compute it from the public price), not a leak — so the guard is scoped to
+  // the bid-history table, where a real max-leak would surface.
+  let noHist109 = true
+  for (const m of [B2, B3, B4]) if ((await m.page.locator('[data-testid="auction-history"]').innerText()).includes('109')) noHist109 = false
+  assert(noHist109, `Auction UI — the losing max 109 never appears as a bid-history row (only the $110 standing price does) — the old two-row leak is gone`)
   // The personal outbid message on bidder 1's screen, with the lower-bound wording.
   await B1.page.waitForSelector('[data-testid="auction-message"][data-kind="outbid"]', { timeout: 10_000 })
   const outbidTxt = await B1.page.locator('[data-testid="auction-message"]').innerText()
-  assert(/outbid/i.test(outbidTxt) && outbidTxt.includes('Bidder 2') && outbidTxt.includes('$110') && outbidTxt.includes('at least $109'),
-    `Auction UI — outbid message names the leader + price + honest lower bound ("${outbidTxt.replace(/\s+/g, ' ').trim()}")`)
+  assert(/not winning/i.test(outbidTxt) && outbidTxt.includes('Bidder 2') && outbidTxt.includes('$110') && outbidTxt.includes('at least $109'),
+    `Auction UI — not-winning message names the leader + price + honest lower bound ("${outbidTxt.replace(/\s+/g, ' ').trim()}")`)
   assert((await historyRows(B1.page)) === 2, `Auction UI — two rows after 2 submitted bids`)
 
   // Bid 3 — bidder 3 bids 130 (below bidder 2's max 150) → incumbent holds, proxy raises
@@ -904,6 +909,25 @@ async function main() {
   const afterCancel = await readAuction(happyGid)
   assert(b4Val === '26500' && afterCancel?.currentAmount === 131 && (await historyRows(B4.page)) === 3,
     `Auction UI — Cancel does NOT submit: price stays $131, no new row, field keeps 26500`)
+
+  // ── 9b — STALENESS REGRESSION: the personal status box is DERIVED, not frozen ──
+  // Bidder 1 has been IDLE since being outbid back at $110 (leader Bidder 2). Now push the
+  // price far higher AND change the leader, using OTHER bidders, while Bidder 1 does nothing.
+  // The old bug froze the box at event time ("Bidder 2 … at $110 … at least $109") even as the
+  // live price marched on — teaching a FALSE lower bound. The derived box must now track the
+  // CURRENT price + CURRENT leader, and the stale values must appear NOWHERE in it.
+  banner('9b — personal status is DERIVED: the not-winning box tracks the live price/leader, never frozen')
+  await uiBid(B4.page, 900)   // B4 overtakes B2 (max 150) → $151; leader becomes Bidder 4
+  await pollAuction(happyGid, a => a?.highBidderIndex === 4 && a?.currentAmount === 151, 10_000)
+  await uiBid(B2.page, 800)   // B2 re-challenges (800 < B4's 900) → B4's proxy defends to $801
+  await pollAuction(happyGid, a => a?.highBidderIndex === 4 && a?.currentAmount === 801, 10_000)
+  // Bidder 1 never touched their screen through either bid. Read Bidder 1's box now.
+  await B1.page.waitForSelector('[data-testid="auction-message"][data-kind="outbid"]', { timeout: 10_000 })
+  const staleTxt = await B1.page.locator('[data-testid="auction-message"]').innerText()
+  assert(staleTxt.includes('Bidder 4') && staleTxt.includes('$801') && staleTxt.includes('at least $800'),
+    `9b — the box shows the CURRENT leader (Bidder 4), CURRENT price ($801) and LIVE lower bound ($800), recomputed live ("${staleTxt.replace(/\s+/g, ' ').trim()}")`)
+  assert(!staleTxt.includes('$110') && !staleTxt.includes('$109') && !staleTxt.includes('Bidder 2'),
+    `9b — the STALE outbid-moment values ($110 price / $109 bound / Bidder 2) appear NOWHERE in the box (not frozen at event time)`)
 
   // ── Concurrency THROUGH THE UI: 4 simultaneous real clicks settle on one price ──
   banner('Live auction UI — 4 simultaneous UI bids → exact proxy price 3001, no lost updates')
