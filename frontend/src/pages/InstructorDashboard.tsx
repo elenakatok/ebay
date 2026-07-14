@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { InstructorDashboard as SharedDashboard } from '@mygames/game-ui'
 import { auth, functions, rtdb } from '../firebase'
 import { ebayConfig } from '../gameConfig'
@@ -9,11 +10,18 @@ const roleLabels = Object.fromEntries(
 )
 
 // ── eBay AUCTION PANEL (top of the dashboard) ────────────────────────────────────
-// eBay is single-role, so the shared dashboard's `renderRoundControls` slot never
-// renders (it's multi-round only) and the fixed action bar exposes no slot — so the
-// per-group Start Auction controls cannot be injected INTO the shared top bar without a
-// game-ui change (deny-listed). Instead this eBay-local panel is rendered ABOVE the
-// shared dashboard, giving the Start Auction controls the TOP position (spec §7d Fix 1).
+// eBay is single-role, so the shared dashboard's `renderRoundControls` slot never renders
+// (it's gated on server-driven multi-round staging) and the shared action bar exposes no
+// eBay slot — so these Start Auction controls cannot be injected INTO shared game-ui without
+// a shared change (deny-listed). The shared <main> is the only injection point.
+//
+// PLACEMENT (Slice 9): rendered as a plain sibling before <SharedDashboard>, this strip
+// floated ABOVE the site header/logo (GameHeader is `position: sticky`, so it occupies flow;
+// a sibling before the dashboard is genuinely first in the document). Sibling JSX/CSS ordering
+// can only put the strip fully above or fully below the whole dashboard — never between the
+// button bar and the roster. So it is PORTALED into the shared <main> as its first child,
+// landing BELOW the button bar and ABOVE the title/roster (the same slot Baxter's round-control
+// box occupies), at the page container width — with ZERO shared-package change.
 //
 // This panel is a slim CONTROL strip only: per-group Start Auction + live auction status.
 // It intentionally does NOT list per-student Won/Lost/No bid — that duplicated the shared
@@ -32,6 +40,20 @@ function EbayAuctionPanel() {
   const [groups, setGroups] = useState<GroupReport[]>([])
   const [busy, setBusy] = useState<Record<string, boolean>>({})
   const [msg, setMsg] = useState<Record<string, string>>({})
+  const [host, setHost] = useState<HTMLElement | null>(null)
+
+  // Mount a host node as the FIRST child of the shared dashboard's <main> (rendered by the
+  // sibling <SharedDashboard>; present in the DOM by the time this post-commit effect runs).
+  // The strip then portals into it — below the button bar, above the title/roster.
+  useEffect(() => {
+    const main = document.querySelector('main')
+    if (!main) return
+    const node = document.createElement('div')
+    node.setAttribute('data-ebay-auction-host', '')
+    main.insertBefore(node, main.firstChild)
+    setHost(node)
+    return () => { node.remove(); setHost(null) }
+  }, [])
 
   // Poll getReportData: it returns the group list + per-group auction status + per-member
   // Won/Lost/No bid (all without requiring finalize), so this one source drives everything.
@@ -55,10 +77,10 @@ function EbayAuctionPanel() {
       .finally(() => setBusy(b => ({ ...b, [gid]: false })))
   }
 
-  if (groups.length === 0) return null
+  if (!host || groups.length === 0) return null
 
-  return (
-    <div data-testid="auction-controls" style={{ maxWidth: 1100, margin: '1rem auto 0', padding: '0.75rem 1rem', border: '1px solid #d0d7de', borderRadius: 8, background: '#fbfcfd' }}>
+  return createPortal(
+    <div data-testid="auction-controls" style={{ margin: '0 0 1.5rem', padding: '0.75rem 1rem', border: '1px solid #d0d7de', borderRadius: 8, background: '#fbfcfd' }}>
       <div style={{ fontWeight: 700, marginBottom: '0.5rem', fontSize: '1.05rem' }}>Live auctions</div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
         {groups.map((g, i) => {
@@ -96,14 +118,16 @@ function EbayAuctionPanel() {
           )
         })}
       </div>
-    </div>
+    </div>,
+    host,
   )
 }
 
 export default function InstructorDashboard() {
   return (
     <>
-      {/* Auction controls at the TOP (spec §7d; per-student outcomes removed in Slice 8). */}
+      {/* Auction controls — portaled into the shared <main>, below the button bar and above
+          the roster (Slice 9). Order here is irrelevant; the panel places itself. */}
       <EbayAuctionPanel />
       <SharedDashboard
         title="Instructor Dashboard — eBay"

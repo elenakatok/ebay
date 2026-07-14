@@ -1158,11 +1158,19 @@ async function main() {
   // Panel populates from getReportData — wait for a resolved per-group status line.
   await dash.waitForSelector('[data-testid^="auction-result-"]', { timeout: 20_000 })
 
-  // Fix 1 (unchanged) — the auction panel (Start Auction lives here) sits ABOVE the roster.
+  // Slice 9 — the auction panel is PORTALED into the shared <main>: it sits BELOW the button
+  // bar (Match Now / Reports / Settings) and ABOVE the roster, and NOTHING renders above the
+  // site logo/header. (Previously it floated above the logo as a plain sibling.)
   const panelBox  = await dash.locator('[data-testid="auction-controls"]').boundingBox()
   const rosterBox = await dash.locator('table').first().boundingBox()
+  const logoBox   = await dash.locator('img[alt="myGames.live"]').boundingBox()
+  const barBtnBox = await dash.locator('button:has-text("Reports")').first().boundingBox()
   assert(panelBox && rosterBox && panelBox.y < rosterBox.y,
-    `7d — the Start-Auction / auction panel sits ABOVE the roster (panel.y=${Math.round(panelBox?.y ?? -1)} < roster.y=${Math.round(rosterBox?.y ?? -1)})`)
+    `9 — the auction panel sits ABOVE the roster (panel.y=${Math.round(panelBox?.y ?? -1)} < roster.y=${Math.round(rosterBox?.y ?? -1)})`)
+  assert(panelBox && barBtnBox && panelBox.y > (barBtnBox.y + barBtnBox.height),
+    `9 — the auction panel sits BELOW the button bar (panel.y=${Math.round(panelBox?.y ?? -1)} > bar.bottom=${Math.round((barBtnBox?.y ?? 0) + (barBtnBox?.height ?? 0))})`)
+  assert(panelBox && logoBox && logoBox.y < panelBox.y,
+    `9 — nothing renders above the site logo/header (logo.y=${Math.round(logoBox?.y ?? -1)} < panel.y=${Math.round(panelBox?.y ?? -1)})`)
 
   // Slice 8 — the per-student outcome table is GONE: no Won/Lost/No bid chip renders on the
   // dashboard, so there is exactly ONE roster (the shared one). The instructor reads
