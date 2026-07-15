@@ -22,10 +22,10 @@
  * COVERAGE (student launch → grade push):
  *   1. Instructor: dashboard loads, roster visible (all 13 students).
  *   2. Every student launches as the single role `bidder` (no role branch).
- *   3. REAL KC (Slice 6): a single-option role gate ("What is your role?" → Bidder,
- *      always true → passes first click) + Gary's 5 graded MC. Options shuffle per
- *      student (drive selects by label text). stu-1 gets 3/5 (score 0.6), stu-2 gets
- *      0/5 (score 0 — a wrong answer never blocks), everyone else 5/5 (1.0).
+ *   3. REAL KC (eBay_KC_Questions_v2.md): a single-option role gate ("What is your role?"
+ *      → Bidder, always true → passes first click) + 11 graded MC. Options shuffle per
+ *      student (drive selects by label text). stu-1 gets 7/11, stu-2 gets 0/11 (score 0 —
+ *      a wrong answer never blocks), everyone else 11/11 (1.0).
  *   4. Info-document phase: the role sheet link is present AND resolves (shared eBay.pdf).
  *   5. Matching: 13 → [5,4,4] — R1 all placed, 4→5 flex, R2 exactly one expert
  *      (bidderIndex 1) per group, each student's payload carries their own endowment,
@@ -95,36 +95,58 @@ const PIDS = Array.from({ length: 13 }, (_, i) => `stu-${i + 1}`)
 const HAPPY_PRICE    = 500
 const DEADLOCK_PRICE = 777
 
-// ── Slice 6: the REAL KC (single-option gate + 5 graded statics) + the no-show ──
+// ── Slice 6: the REAL KC (single-option gate + 11 graded statics) + the no-show ──
 const NOSHOW_PID  = PIDS[PIDS.length - 1]              // stu-13 — launches + KC, never attends
 const ATTEND_PIDS = PIDS.filter(p => p !== NOSHOW_PID) // the 12 who attend → [4,4,4]
 
-// The 5 graded statics, in stepper order (prepDefaults order 1..5). For each, a UNIQUE
+// The 11 graded statics, in stepper order (prepDefaults order 1..11). For each, a UNIQUE
 // substring of the CORRECT option label and of a WRONG option label — the drive selects
 // by TEXT so it is immune to the per-student option shuffle. (Verbatim from
 // eBay_KC_Questions_v1.md; Q3 uses the corrected 2×2 set, Q5 has 3 options.)
-const KC_FIELDS  = ['kc_private_vs_common', 'kc_information_structure', 'kc_second_price', 'kc_hard_close', 'kc_profit_definition']
+// 11 graded fields in render order (prepDefaults `order` 1..11: Q1–Q7 general theory,
+// Q8–Q11 the French-horn case). Verbatim from eBay_KC_Questions_v2.md.
+const KC_FIELDS  = [
+  'kc_format_dimensions', 'kc_english_vs_sealed', 'kc_dutch_auction', 'kc_second_price_truthful',
+  'kc_first_price_shading', 'kc_revenue_equivalence', 'kc_private_vs_common',
+  'kc_information_structure', 'kc_second_price', 'kc_hard_close', 'kc_profit_definition',
+]
 const KC_CORRECT = {
-  kc_private_vs_common:     'learn nothing about the value',
-  kc_information_structure: 'uncertain information about the non-expert',
-  kc_second_price:          'the highest bid. They pay the second highest bid',
-  kc_hard_close:            'At a pre-specified time',
-  kc_profit_definition:     'Neither of the above',
+  kc_format_dimensions:      'How price is determined',
+  kc_english_vs_sealed:      'can observe the bids placed by others',
+  kc_dutch_auction:          'the price starts high and falls',
+  kc_second_price_truthful:  'exactly their true valuation',
+  kc_first_price_shading:    'below the valuation',
+  kc_revenue_equivalence:    'English, Dutch, first-price sealed-bid',
+  kc_private_vs_common:      'learn nothing about the value',
+  kc_information_structure:  'uncertain information about the non-expert',
+  kc_second_price:           'the highest bid. They pay the second highest bid',
+  kc_hard_close:             'At a pre-specified time',
+  kc_profit_definition:      'Neither of the above',
 }
 const KC_WRONG = {
-  kc_private_vs_common:     'attract more bidders',
-  kc_information_structure: 'You will be a seller',
-  kc_second_price:          'second highest bid. They pay their own bid',
-  kc_hard_close:            'no buyer wants to bid',
-  kc_profit_definition:     'Use value',
+  kc_format_dimensions:      'The number of bidders allowed',
+  kc_english_vs_sealed:      'pay a fixed price regardless',
+  kc_dutch_auction:          'the price starts low and rises',
+  kc_second_price_truthful:  'as low as possible',
+  kc_first_price_shading:    'above the valuation',
+  kc_revenue_equivalence:    'Only English and Dutch',
+  kc_private_vs_common:      'attract more bidders',
+  kc_information_structure:  'You will be a seller',
+  kc_second_price:           'second highest bid. They pay their own bid',
+  kc_hard_close:             'no buyer wants to bid',
+  kc_profit_definition:      'Use value',
 }
-// Answer plan by pid: stu-1 → 3/5 (score 0.6); stu-2 → 0/5 (score 0); all others → 5/5 (1.0).
-const KC_THREE_PID = PIDS[0]   // stu-1
-const KC_ZERO_PID  = PIDS[1]   // stu-2
+// Answer plan by pid: stu-1 gets Part I right / Part II wrong → 7/11; stu-2 → 0/11 (score 0);
+// all others → 11/11 (1.0). Scores computed from the counts, so they track the field count.
+const KC_STU1_CORRECT = ['kc_format_dimensions', 'kc_english_vs_sealed', 'kc_dutch_auction',
+  'kc_second_price_truthful', 'kc_first_price_shading', 'kc_revenue_equivalence', 'kc_private_vs_common']
+const KC_THREE_PID = PIDS[0]   // stu-1 — the partial-score student (7 of 11)
+const KC_ZERO_PID  = PIDS[1]   // stu-2 — zero correct
+const KC_STU1_SCORE = KC_STU1_CORRECT.length / KC_FIELDS.length   // 7/11, computed exactly as the grader does
 function kcPlanFor(pid) {
-  if (pid === KC_THREE_PID) return new Set(['kc_private_vs_common', 'kc_information_structure', 'kc_second_price'])
+  if (pid === KC_THREE_PID) return new Set(KC_STU1_CORRECT)
   if (pid === KC_ZERO_PID)  return new Set()
-  return new Set(KC_FIELDS)     // everyone else answers all 5 correctly
+  return new Set(KC_FIELDS)     // everyone else answers all 11 correctly
 }
 
 // ── Tiny test harness ──────────────────────────────────────────────────────────
@@ -370,7 +392,7 @@ async function ensureOnRolePage(page, pid) {
   if (!onRole) throw new Error(`${pid} never reached the role page`)
 }
 
-// Drive the REAL KC (Slice 6): the single-option role gate + 5 graded statics. Selects
+// Drive the REAL KC (v2): the single-option role gate + 11 graded statics. Selects
 // options by UNIQUE label text (immune to the per-student option shuffle). Captures each
 // question's shuffled option order (for the shuffle assertion) and returns it.
 async function driveKnowledgeCheck(page, pid, correctSet) {
@@ -379,13 +401,13 @@ async function driveKnowledgeCheck(page, pid, correctSet) {
   await page.locator('main label', { hasText: 'Bidder' }).first().click()
   await page.locator('button:has-text("Submit")').click()
 
-  // ── 5 graded statics (stepper "Concept check — N of 5") ──
+  // ── graded statics (stepper "Concept check — N of 11") ──
   const orders = {}
   let staticsSeen = 0
   for (let i = 0; i < KC_FIELDS.length; i++) {
     const field = KC_FIELDS[i]
-    // Regex (dash-agnostic) so the em-dash in "Concept check — N of 5" can't miss.
-    await page.locator('p', { hasText: new RegExp(`Concept check.*${i + 1} of 5`) }).first().waitFor({ timeout: 30_000 })
+    // Regex (dash-agnostic) so the em-dash in "Concept check — N of 11" can't miss.
+    await page.locator('p', { hasText: new RegExp(`Concept check.*${i + 1} of ${KC_FIELDS.length}`) }).first().waitFor({ timeout: 30_000 })
     staticsSeen++
     // This student's SHUFFLED option order (label text, DOM order) for the shuffle proof.
     orders[field] = (await page.locator('main label').allInnerTexts()).map(t => t.replace(/\s+/g, ' ').trim())
@@ -413,9 +435,9 @@ async function driveSetup(page, pid) {
 
   await page.click('button:has-text("Continue")')
 
-  // Slice 6: the REAL KC — single-option role gate ("What is your role?" → Bidder, always
-  // true → passes first click) then 5 graded MC. Options shuffle per student, so the drive
-  // picks by unique label text. stu-1 gets 3/5, stu-2 gets 0/5, everyone else 5/5.
+  // The REAL KC (eBay_KC_Questions_v2.md) — single-option role gate ("What is your role?" →
+  // Bidder, always true → passes first click) then 11 graded MC. Options shuffle per student,
+  // so the drive picks by unique label text. stu-1 gets 7/11, stu-2 gets 0/11, everyone else 11/11.
   const kc = await driveKnowledgeCheck(page, pid, kcPlanFor(pid))
 
   // Reflection (ungraded, category 'preparation') — kept so the prep phase + Reports
@@ -632,17 +654,23 @@ async function main() {
   assert(bidderCount === PIDS.length,
     `Roles assigned — all ${PIDS.length} students launch as the single role \`bidder\` (got ${bidderCount})`)
 
-  // ── Slice 6 KC: gate seen + passed, all 5 graded rendered, options shuffle per student ──
+  // ── KC (eBay_KC_Questions_v2.md): gate seen + passed, all 11 graded rendered, options shuffle ──
   assert(students.every(s => s.kc?.sawGate),
     `KC — every student saw the role gate ("What is your role in this auction?") and passed on the first click`)
-  assert(students.every(s => s.kc?.staticsSeen === 5),
-    `KC — all 5 graded questions rendered + submitted for every student (got [${[...new Set(students.map(s => s.kc?.staticsSeen))].join(',')}])`)
+  assert(students.every(s => s.kc?.staticsSeen === KC_FIELDS.length),
+    `KC — all ${KC_FIELDS.length} graded questions rendered + submitted for every student (got [${[...new Set(students.map(s => s.kc?.staticsSeen))].join(',')}])`)
   // Option order shuffles per student (seed = djb2(participantId + ':' + field)): two
-  // different students differ on ≥1 of the 5 questions' option orders.
+  // different students differ on ≥1 of the questions' option orders.
   const kcFlat = s => KC_FIELDS.map(f => (s.kc?.orders?.[f] ?? []).join('|')).join(' || ')
   const sA = students.find(s => s.pid === 'stu-3'), sB = students.find(s => s.pid === 'stu-4')
   assert(sA && sB && kcFlat(sA) !== kcFlat(sB),
-    `KC — options shuffle per student: stu-3 and stu-4 see a different option order on ≥1 of the 5 questions`)
+    `KC — options shuffle per student: stu-3 and stu-4 see a different option order on ≥1 of the ${KC_FIELDS.length} questions`)
+  // Q9 correction (eBay_KC_Questions_v2.md): kc_second_price renders FOUR DISTINCT options —
+  // the source's duplicate-distractor typo (identical (b)/(c)) is GONE, so with shuffle there
+  // is no phantom "two identical answers" that reads as a platform bug.
+  const q9Labels = sA?.kc?.orders?.['kc_second_price'] ?? []
+  assert(q9Labels.length === 4 && new Set(q9Labels).size === 4,
+    `KC — Q9 (second price) renders FOUR DISTINCT options, no duplicate distractor (${new Set(q9Labels).size} unique of ${q9Labels.length})`)
 
   // (4) The ONE shared case PDF must RESOLVE over the frontend origin (not 404 / SPA fallback).
   const pdf = await fetch(`${FE}/role-info/eBay.pdf`)
@@ -1111,8 +1139,8 @@ async function main() {
   assert(pushed.every(r => r.result.knowledge_check_score === null ||
       (typeof r.result.knowledge_check_score === 'number' && r.result.knowledge_check_score >= 0 && r.result.knowledge_check_score <= 1)),
     `Grade push — knowledge_check_score rides as its own 0–1 field on every record`)
-  assert(pushedById[KC_THREE_PID]?.knowledge_check_score === 0.6 && pushedById[KC_ZERO_PID]?.knowledge_check_score === 0,
-    `Grade push — the real KC values reach the gradebook (3/5 → 0.6, 0/5 → 0) [got ${pushedById[KC_THREE_PID]?.knowledge_check_score} / ${pushedById[KC_ZERO_PID]?.knowledge_check_score}]`)
+  assert(pushedById[KC_THREE_PID]?.knowledge_check_score === KC_STU1_SCORE && pushedById[KC_ZERO_PID]?.knowledge_check_score === 0,
+    `Grade push — the real KC values reach the gradebook (7/11 → ${KC_STU1_SCORE}, 0/11 → 0) [got ${pushedById[KC_THREE_PID]?.knowledge_check_score} / ${pushedById[KC_ZERO_PID]?.knowledge_check_score}]`)
 
   // PROFIT IS NOT IN THE PAYLOAD in ANY form — not scored, not metadata.
   const profitLeak = pushed.find(r => {
@@ -1159,10 +1187,10 @@ async function main() {
   assert(pushedById[NOSHOW_PID]?.normalized_score === -2 && pushedById[NOSHOW_PID]?.status === 'no_show',
     `Grade push — the true no-show is delivered with normalized_score −2 / status no_show`)
 
-  // ── KC scores land per spec (denominator 5): 3/5 → 0.6, 0/5 → 0, all-correct → 1.0 ──
+  // ── KC scores land per spec (denominator 11): 7/11, 0/11 → 0, all-correct → 1.0 ──
   const kcOf = pid => byPidFinal[pid]?.knowledge_check_score
-  assert(kcOf(KC_THREE_PID) === 0.6,
-    `KC score — the 3-of-5 student ${KC_THREE_PID} finalizes with knowledge_check_score 0.6 (got ${kcOf(KC_THREE_PID)})`)
+  assert(kcOf(KC_THREE_PID) === KC_STU1_SCORE,
+    `KC score — the 7-of-11 student ${KC_THREE_PID} finalizes with knowledge_check_score ${KC_STU1_SCORE} (denominator 11, got ${kcOf(KC_THREE_PID)})`)
   assert(kcOf(KC_ZERO_PID) === 0,
     `KC score — the all-wrong student ${KC_ZERO_PID} STILL finalizes, score 0 (a wrong answer never blocks progress) (got ${kcOf(KC_ZERO_PID)})`)
   assert(kcOf('stu-3') === 1,

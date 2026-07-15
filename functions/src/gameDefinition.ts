@@ -1,5 +1,5 @@
 import type { Outcome, OutcomeSchema, RoleConfig } from '@mygames/game-engine'
-import type { GameDefinition } from '@mygames/game-server'
+import type { GameDefinition, PrepTextQuestion } from '@mygames/game-server'
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // eBay — SINGLE-ROLE game (Part 3).
@@ -19,11 +19,12 @@ import type { GameDefinition } from '@mygames/game-server'
 //
 // KC (Slice 6 — Option (b)): a single-option role gate ("What is your role?" →
 // Bidder, which is always true for the single role, so it passes on the first click)
-// plus Gary's 5 graded MC (kc_* fields, verbatim from eBay_KC_Questions_v1.md). The
-// shared KC flow is gate-driven at BOTH ends (the KnowledgeCheck UI needs a gate
-// question to render; the graded-static submit needs the gate's completed_at marker),
-// so the gate is REQUIRED to grade — no shared-package change, no participant preset.
-// KC score = correct statics / 5 (0.0–1.0), pushed to the gradebook as its OWN field.
+// plus 11 graded MC (kc_* fields, per eBay_KC_Questions_v2.md — 7 general auction-theory
+// questions + 4 French-horn-case questions). The shared KC flow is gate-driven at BOTH ends
+// (the KnowledgeCheck UI needs a gate question to render; the graded-static submit needs the
+// gate's completed_at marker), so the gate is REQUIRED to grade — no shared-package change,
+// no participant preset. KC score = correct statics / 11 (0.0–1.0; the shared grader counts
+// grading:'static' dynamically), pushed to the gradebook as its OWN field.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 // ── Role config (ONE role — `bidder`) ─────────────────────────────────────────
@@ -80,6 +81,20 @@ export function computeRawScore(
   return computeScoreBreakdown(roleKey, outcome, configData).raw_score
 }
 
+// ── Graded-KC data-object helper ──────────────────────────────────────────────
+// Every graded static question is built via gq() as a DATA OBJECT (the admin-defaults
+// screen is a future addition and must stay small — never hand-write inline literals).
+// grading 'static' + a locked correct_value keyed to option CONTENT (value), never a
+// letter position (getStudentPrepQuestions shuffles the options per student).
+const gq = (
+  field: string, order: number, correct_value: string,
+  prompt: string, options: { value: string; label: string }[], explanation: string,
+): PrepTextQuestion => ({
+  field, type: 'mc', system: false, category: 'knowledge_check', format: 'multiple_choice',
+  grading: 'static', correct_value, role_target: 'bidder', prompt,
+  placeholder: '', order, hidden: false, deletable: false, options, explanation,
+})
+
 // ── GameDefinition ────────────────────────────────────────────────────────────
 
 export const ebayGameDef: GameDefinition = {
@@ -122,19 +137,21 @@ export const ebayGameDef: GameDefinition = {
     { roleKey: 'bidder', links: [{ key: 'bidder_sheet_url', label: 'Role sheet' }] },
   ],
 
-  // ── prepDefaults: KC gate + 5 graded statics + 1 ungraded reflection ──────────
-  // Slice 6 (Option (b)). The gate (Q0) is a single-option role question — eBay has
-  // ONE role, so "Bidder" is always the true answer and it passes on the first click;
-  // it is graded 'assigned_role' (against the student's real role, server-side) and is
-  // NOT part of the KC score. Q1–Q5 are Gary's graded MC (verbatim from
-  // eBay_KC_Questions_v1.md): category 'knowledge_check', system false, grading
-  // 'static', each with a locked correct_value. KC score = correct statics / 5.
-  // Q3 uses the corrected 2×2 option set (the source PDF's duplicate distractor is
-  // fixed); Q5 has 3 options (deliberate, per source). Option order shuffles per
-  // student (getStudentPrepQuestions); explanations name the concept, never a slot.
-  // One ungraded free-response reflection (category 'preparation') is kept so the
-  // prep phase and the Reports text tile still have content — the source has none,
-  // so this is a platform-standard participation prompt, not from Gary's canvas.
+  // ── prepDefaults: KC gate + 11 graded statics + 1 ungraded reflection ─────────
+  // AUTHORITY: eBay_KC_Questions_v2.md (FINAL, supersedes v1's 5). The gate (Q0) is a
+  // single-option role question — eBay has ONE role, so "Bidder" is always the true answer
+  // and it passes on the first click; graded 'assigned_role' (server-side, against the real
+  // role) and NOT part of the KC score. Q1–Q11 are graded MC built via gq() as DATA OBJECTS:
+  //   • Q1–Q7  general auction theory (Gary's new questions; Q7 replaces v1's private-vs-common)
+  //   • Q8–Q11 the French horn case (v1 Q2–Q5, unchanged)
+  // KC score = correct statics / 11 (the shared grader counts grading:'static' dynamically —
+  // no hardcoded denominator). Q9 (second price) keeps the corrected 2×2 option set — the
+  // source's duplicate-distractor typo is gone (four DISTINCT options); Q11 has 3 options
+  // (deliberate, per source). Options shuffle per student (getStudentPrepQuestions); grading
+  // is content-keyed (option value), so source letter clustering is irrelevant. Explanations
+  // name the concept, never a slot. PROFIT IS NEVER GRADED — Q11 asks the student to DEFINE
+  // profit; it does not make their profit a grade. One ungraded reflection (participation) is
+  // kept so the prep phase + Reports text tile still have content.
   prepDefaults: [
     // ── Q0: role gate (system, ungraded — single option; always passes) ──────────
     {
@@ -149,84 +166,116 @@ export const ebayGameDef: GameDefinition = {
       explanation: 'You are a Bidder in the French horn auction.',
     },
 
-    // ── Q1: private value vs. common value (graded) ──────────────────────────────
-    {
-      field: 'kc_private_vs_common', type: 'mc', system: false,
-      category: 'knowledge_check', format: 'multiple_choice',
-      grading: 'static', correct_value: 'private_learn_nothing', role_target: 'bidder',
-      prompt: 'According to the reading "Bidding in Competition," the difference between a private-value auction and a common-value auction is:',
-      placeholder: '', order: 1, hidden: false, deletable: false,
-      options: [
+    // ── Part I — general auction theory (Q1–Q7) ──────────────────────────────────
+    gq('kc_format_dimensions', 1, 'fmt_price_determined',
+      'The auction video classifies auction formats along three dimensions. Which of the following is one of those three dimensions?',
+      [
+        { value: 'fmt_num_bidders',      label: 'The number of bidders allowed to participate' },
+        { value: 'fmt_price_determined', label: 'How price is determined' },
+        { value: 'fmt_venue',            label: 'Whether the auction is held online or in person' },
+        { value: 'fmt_reserve',          label: 'The minimum reserve price set by the seller' },
+      ],
+      'The three dimensions are how bids are collected, bidder valuation type, and how price is determined. Note what is not on the list: venue, participant count, and reserve are parameters within a format, not ways of classifying formats.'),
+
+    gq('kc_english_vs_sealed', 2, 'eng_observe_others',
+      'In an English (ascending-bid) auction, compared to a sealed-bid auction, bidders:',
+      [
+        { value: 'eng_fixed_price',    label: 'pay a fixed price regardless of other bids' },
+        { value: 'eng_observe_others', label: 'can observe the bids placed by others as the auction proceeds' },
+        { value: 'eng_one_bid',        label: 'must submit only one bid before the auction opens' },
+        { value: 'eng_know_winner',    label: 'know in advance who the winner will be' },
+      ],
+      'The distinction is information. In an ascending-bid auction you watch other bids arrive and can revise; in sealed-bid and Dutch auctions you cannot. Everything else about the formats follows from that one difference.'),
+
+    gq('kc_dutch_auction', 3, 'dutch_high_falls',
+      'In a Dutch (descending-bid) auction, such as the flower auction at Aalsmeer:',
+      [
+        { value: 'dutch_low_rises',    label: 'the price starts low and rises until a bidder accepts' },
+        { value: 'dutch_sealed',       label: 'bidders submit sealed bids that are opened simultaneously' },
+        { value: 'dutch_high_falls',   label: 'the price starts high and falls until a bidder stops the clock' },
+        { value: 'dutch_second_price', label: 'the highest bidder pays the second-highest bid' },
+      ],
+      'The price descends from a high opening. The first bidder to stop the clock wins and pays that price. The consequence: you get one decision, and taking it early costs money while waiting risks losing the item entirely.'),
+
+    gq('kc_second_price_truthful', 4, 'sp_true_value',
+      "According to the video, in a second-price, sealed-bid auction, a bidder's best bid is:",
+      [
+        { value: 'sp_as_low',        label: 'as low as possible, to protect potential profit' },
+        { value: 'sp_true_value',    label: 'exactly their true valuation' },
+        { value: 'sp_average',       label: 'the average of what they expect others to bid' },
+        { value: 'sp_above_highest', label: 'slightly above the highest valuation they think anyone could have' },
+      ],
+      "Your bid determines whether you win, not what you pay — the second-highest bid sets the price. Shading down only loses you auctions you wanted; bidding up only wins you auctions you didn't. Truthful bidding is a dominant strategy: right regardless of what anyone else does."),
+
+    gq('kc_first_price_shading', 5, 'fp_below',
+      "In a Dutch auction or a first-price sealed-bid auction, a bidder's optimal bid, compared to their true valuation, is typically:",
+      [
+        { value: 'fp_equal',     label: 'equal to the valuation' },
+        { value: 'fp_below',     label: 'below the valuation (a "shave")' },
+        { value: 'fp_above',     label: 'above the valuation' },
+        { value: 'fp_unrelated', label: 'unrelated to the valuation' },
+      ],
+      'Here the winner pays their own bid — so bidding your true value guarantees zero profit even when you win. You shave below your valuation to leave a margin, trading a lower chance of winning against a better price when you do. This is exactly the tension second-price removes.'),
+
+    gq('kc_revenue_equivalence', 6, 're_all_four',
+      'Under the revenue equivalence result presented in the video, when bidders have private valuations, which auction formats yield the same expected revenue for the seller?',
+      [
+        { value: 're_english_dutch', label: 'Only English and Dutch auctions' },
+        { value: 're_two_sealed',    label: 'Only the two sealed-bid formats (first-price and second-price)' },
+        { value: 're_all_four',      label: 'English, Dutch, first-price sealed-bid, and second-price sealed-bid auctions' },
+        { value: 're_none',          label: 'No two formats yield the same expected revenue' },
+      ],
+      'All four. Expected revenue equals the expected valuation of the second-highest bidder in every case. Bidding behavior differs wildly (truthful vs shaved) but the effects cancel exactly. This is why format choice must be justified on grounds other than revenue: speed, transparency, collusion-resistance, information leakage.'),
+
+    gq('kc_private_vs_common', 7, 'private_learn_nothing',
+      'The difference between a private-value auction and a common-value auction is:',
+      [
         { value: 'common_more_bidders',   label: 'Common-value auctions attract more bidders.' },
         { value: 'private_negotiations',  label: 'Private-value auctions are better done as negotiations.' },
         { value: 'private_learn_nothing', label: "Private-value bidders learn nothing about the value of the item from learning others' bids." },
         { value: 'private_raise_more',    label: 'Private-value auctions raise more money from the bidders.' },
       ],
-      explanation: 'A bidder has a private valuation when their value for the item is unaffected by what others think it is worth — so another bidder’s bid carries no information about it. In the common-value case, bidders all share the same underlying valuation but are typically uncertain what it is, so others’ bids are informative.',
-    },
+      "A bidder has a private valuation when their value is unaffected by what others think it's worth — so another's bid carries no information. In the common-value case, bidders share the same underlying valuation but are uncertain what it is, so others' bids are informative. That difference is the entire source of the winner's curse."),
 
-    // ── Q2: the information structure of this auction (graded) ────────────────────
-    {
-      field: 'kc_information_structure', type: 'mc', system: false,
-      category: 'knowledge_check', format: 'multiple_choice',
-      grading: 'static', correct_value: 'expert_uncertain_use', role_target: 'bidder',
-      prompt: 'In the French horn auction you will participate in:',
-      placeholder: '', order: 2, hidden: false, deletable: false,
-      options: [
+    // ── Part II — the French horn case (Q8–Q11; v1 Q2–Q5, unchanged) ─────────────
+    gq('kc_information_structure', 8, 'expert_uncertain_use',
+      'In the French horn auction you will participate in:',
+      [
         { value: 'all_uncertain',        label: 'All bidders have uncertain information about the resale value of the horn, as well as uncertain information about the private use values for the horn.' },
         { value: 'expert_knows_all',     label: "There is one expert bidder who knows the resale value of the horn for certain, and also knows each non-expert bidder's private use value for certain. There are also several non-experts who have uncertain information about the resale value but certain information about their own private use value." },
         { value: 'expert_uncertain_use', label: "There is one expert bidder who knows the resale value of the horn for certain but has uncertain information about the non-expert bidders' private use values. There are also several non-experts who have uncertain information about the resale value but certain information about their own private use value." },
         { value: 'seller',               label: 'You will be a seller looking to sell a French horn to the highest bidder.' },
       ],
-      explanation: 'The expert knows the resale value exactly — that is the common component, identical for everyone. The expert does NOT know the non-experts’ private use values. Each non-expert is in the mirror position: uncertain about the resale value, but certain about their own use value.',
-    },
+      "The expert knows the resale value exactly — the common component, identical for everyone. The expert does not know the non-experts' private use values. Each non-expert is in the mirror position. This is a hybrid of Q7's two pure cases, which is what makes the auction interesting."),
 
-    // ── Q3: second-price rules (graded; corrected 2×2 option set) ─────────────────
-    {
-      field: 'kc_second_price', type: 'mc', system: false,
-      category: 'knowledge_check', format: 'multiple_choice',
-      grading: 'static', correct_value: 'highest_pays_second', role_target: 'bidder',
-      prompt: 'The auction is "second price." This means the winner of the auction is:',
-      placeholder: '', order: 3, hidden: false, deletable: false,
-      options: [
+    gq('kc_second_price', 9, 'highest_pays_second',
+      'The auction is "second price." This means the winner of the auction is:',
+      [
         { value: 'second_pays_own',     label: 'The person who makes the second highest bid. They pay their own bid.' },
         { value: 'second_pays_highest', label: 'The person who makes the second highest bid. They pay the highest bid.' },
         { value: 'highest_pays_own',    label: 'The person who makes the highest bid. They pay their own bid.' },
         { value: 'highest_pays_second', label: 'The person who makes the highest bid. They pay the second highest bid.' },
       ],
-      explanation: 'The highest bidder wins, but pays only what it took to beat the runner-up — the second highest bid (plus the increment). Winning and paying are decided by two different bids.',
-    },
+      'The highest bidder wins but pays only what it took to beat the runner-up. Winning and paying are decided by two different bids. That separation is the whole mechanism, and it is why truthful bidding is optimal.'),
 
-    // ── Q4: hard close (graded) ──────────────────────────────────────────────────
-    {
-      field: 'kc_hard_close', type: 'mc', system: false,
-      category: 'knowledge_check', format: 'multiple_choice',
-      grading: 'static', correct_value: 'prespecified_time', role_target: 'bidder',
-      prompt: 'The auction ends:',
-      placeholder: '', order: 4, hidden: false, deletable: false,
-      options: [
+    gq('kc_hard_close', 10, 'prespecified_time',
+      'The auction ends:',
+      [
         { value: 'prespecified_time', label: 'At a pre-specified time.' },
         { value: 'no_buyer',          label: 'When no buyer wants to bid any further.' },
         { value: 'after_proxy',       label: 'After each bidder has entered a proxy bid.' },
         { value: 'seller_announces',  label: 'When the seller announces it is closed.' },
       ],
-      explanation: 'This auction has a hard close — a fixed deadline set when the auction opens. It does not wait for bidding to go quiet, and the seller does not decide when to stop. The clock does. That is what makes last-moment bidding (sniping) a live strategic question.',
-    },
+      "This auction has a hard close — a fixed deadline set when the auction opens. It doesn't wait for bidding to go quiet, and the seller doesn't decide when to stop. The clock does. That's what makes sniping a live strategic question rather than a curiosity."),
 
-    // ── Q5: what profit actually is (graded; 3 options, per source) ──────────────
-    {
-      field: 'kc_profit_definition', type: 'mc', system: false,
-      category: 'knowledge_check', format: 'multiple_choice',
-      grading: 'static', correct_value: 'neither', role_target: 'bidder',
-      prompt: 'The objective of non-expert buyers in this auction is to maximize their profit =',
-      placeholder: '', order: 5, hidden: false, deletable: false,
-      options: [
+    gq('kc_profit_definition', 11, 'neither',
+      'The objective of non-expert buyers in this auction is to maximize their profit =',
+      [
         { value: 'use_minus_price',    label: 'Use value − price paid' },
         { value: 'resale_minus_price', label: 'Resale value − price paid' },
         { value: 'neither',            label: 'Neither of the above' },
       ],
-      explanation: 'Profit is use value + resale value − price paid. Both components count: the horn is worth its resale value and whatever it is worth to you personally. Dropping either one understates what winning is worth.',
-    },
+      'Profit is use value + resale value − price paid. Both components count. Dropping either one understates what winning is worth — and a bidder who drops one will systematically underbid.'),
 
     // ── Ungraded reflection (participation only) ──────────────────────────────────
     {

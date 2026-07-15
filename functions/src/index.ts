@@ -29,7 +29,7 @@ import { ebayGameDef } from './gameDefinition'
 admin.initializeApp()
 
 // NOTE: eBay now has a single-role KC gate ('kc_gate_bidder', grading 'assigned_role')
-// plus 5 graded statics (Slice 6, Option (b) — see gameDefinition prepDefaults). The
+// plus 11 graded statics (eBay_KC_Questions_v2.md — see gameDefinition prepDefaults). The
 // shared validateKCGate would PASS (exactly one gate covers the 'bidder' role), but we
 // still don't invoke it here — validation runs at config-save time in makeUpdateGameConfig.
 
