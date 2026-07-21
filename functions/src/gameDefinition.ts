@@ -1,5 +1,6 @@
 import type { Outcome, OutcomeSchema, RoleConfig } from '@mygames/game-engine'
 import type { GameDefinition, PrepTextQuestion } from '@mygames/game-server'
+import { ebayIsJoinable, ebayOnPlace } from './latecomer'
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // eBay — SINGLE-ROLE game (Part 3).
@@ -109,6 +110,12 @@ export const ebayGameDef: GameDefinition = {
   reservations: { bidder: 0 },
   corsOrigins: ['https://ebay.mygames.live'],
   classroom: { callbackSecretId: 'ebay_v1' },
+
+  // Latecomer auto-placement (Latecomer_Placement_Spec_v1 §3.1, step 2). Joinable
+  // = auction under 5 bidders AND clock not started; onPlace assigns the next
+  // bidder slot's endowment exactly as the assignEndowments trigger would.
+  isJoinable: ebayIsJoinable,
+  onPlace: ebayOnPlace,
 
   // Single-role sizing (spec §2b): base group is {bidder:4}; perRoleCap 7 lets one
   // group absorb the remainder up to size 7, so the shared matcher realizes the

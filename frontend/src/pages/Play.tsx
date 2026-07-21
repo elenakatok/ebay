@@ -38,6 +38,7 @@ type GamePhase =
   | { name: 'confirmation' }
   | { name: 'attendance-code' }
   | { name: 'waiting-room' }
+  | { name: 'placement-absent' }
   | { name: 'matched';         groupId: string }
 
 // ── Phase routing ─────────────────────────────────────────────────────────────
@@ -211,6 +212,20 @@ export default function Play() {
     void run()
     return () => { cancelled = true }
   }, [session])
+
+  // ── Latecomer placement outcome (Latecomer_Placement_Spec_v1 §3–§4) ────────
+  // While waiting, watch our own participant doc. A normally-matched student gets
+  // a group_id (WaitingRoom advances to 'matched'); a latecomer for whom no group
+  // was joinable gets latecomer_absent → the clear terminal message below, never
+  // an endless spinner. Server-side placement runs during verifyAttendanceCode, so
+  // the outcome is usually already present the moment this mounts.
+  useEffect(() => {
+    if (phase.name !== 'waiting-room' || !sessPid || !sessIid) return
+    const ref = doc(db, 'game_instances', sessIid, 'participants', sessPid)
+    return onSnapshot(ref, (snap) => {
+      if (snap.data()?.latecomer_absent === true) setPhase({ name: 'placement-absent' })
+    })
+  }, [phase.name, sessPid, sessIid])
 
   // ── Render: pre-session states (no header) ────────────────────────────────
 
@@ -442,6 +457,18 @@ export default function Play() {
           rtdb={rtdb}
           onMatched={(groupId) => setPhase({ name: 'matched', groupId })}
         />
+      )}
+
+      {phase.name === 'placement-absent' && (
+        <main data-testid="placement-absent" style={{ padding: layout.pagePad, maxWidth: '540px', margin: '0 auto' }}>
+          <h1 style={{ marginTop: 0 }}>Class has already started</h1>
+          <p style={{ lineHeight: 1.6, marginBottom: spacing.gapSm }}>
+            There is no auction available to join right now. Please speak to your instructor.
+          </p>
+          <p style={{ color: colors.textSecondary }}>
+            <a href={CLASSROOM_URL}>← Return to classroom</a>
+          </p>
+        </main>
       )}
 
       {phase.name === 'matched' && (

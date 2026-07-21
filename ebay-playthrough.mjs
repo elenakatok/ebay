@@ -307,6 +307,19 @@ const startAuctionFn = gid => callFn('startAuction', { _dev: { game_instance_id:
 const submitBidFn = (pid, gid, maxAmount, extra = {}) =>
   callFn('submitBid', { _test: { participant_id: pid, game_instance_id: GID }, group_id: gid, max_amount: maxAmount, ...extra })
 
+// Firestore REST: create/patch an arbitrary doc under this instance (owner bypass).
+// Used by the latecomer addendum to seed extra groups/participants without the
+// wiping seedGroupForTest endpoint.
+async function restPatch(pathSuffix, fields, maskPaths) {
+  const mask = maskPaths.map(p => `updateMask.fieldPaths=${encodeURIComponent(p)}`).join('&')
+  const res = await fetch(`${FIRESTORE}/game_instances/${GID}/${pathSuffix}?${mask}`, {
+    method: 'PATCH',
+    headers: { Authorization: 'Bearer owner', 'content-type': 'application/json' },
+    body: JSON.stringify({ fields }),
+  })
+  return res.ok
+}
+
 // Firestore REST: set/clear a participant's raw auction_endowment field (owner bypass).
 async function patchEndowment(pid, rawValueOrNull) {
   const body = { fields: { auction_endowment: rawValueOrNull ?? { nullValue: null } } }
@@ -1284,6 +1297,149 @@ async function main() {
   const outcomeText = outcomeVals.join(' | ')
   assert(/Won/.test(studentBody) && /Lost/.test(studentBody) && /No bid/.test(studentBody),
     `8 — Report 3 shows the per-student outcome (Won/Lost/No bid) relocated from the dashboard [${outcomeText.slice(0, 60)}]`)
+
+  // Latecomer auto-placement (step 2) — appended so wiping GID cannot disturb the
+  // 106 checks above. Test 8 (regression) = every assertion above stayed green.
+  await runLatecomerScenarios()
+}
+
+// ── Latecomer auto-placement (Latecomer_Placement_Spec_v1 §3, step 2) ────────────
+// Runs AFTER the 106-check playthrough completes, so wiping GID here cannot disturb
+// it. Drives the code-entry path (verifyAttendanceCode) via callables + REST — no
+// browser needed. seedGroupForTest wipes + seeds one matched group (firing the
+// assignEndowments onCreate trigger); seedGroupDirect (REST) adds extra groups.
+
+const ISO = () => new Date().toISOString()
+const seedGroupWipe = (gid, pids, lead) =>
+  callFn('seedGroupForTest', { game_instance_id: GID, group_id: gid, lead_id: lead, bidder_participants: pids })
+async function seedGroupDirect(gid, pids, lead) {
+  // Participants FIRST: the group-doc create fires the assignEndowments onCreate
+  // trigger, which .update()s each member — the members must already exist.
+  for (const p of pids) {
+    await restPatch(`participants/${p}`, {
+      participant_id: { stringValue: p }, game_instance_id: { stringValue: GID },
+      role: { stringValue: 'bidder' }, group_id: { stringValue: gid },
+      is_lead: { booleanValue: p === lead }, attendance_confirmed_at: { timestampValue: ISO() },
+    }, ['participant_id', 'game_instance_id', 'role', 'group_id', 'is_lead', 'attendance_confirmed_at'])
+  }
+  await restPatch(`groups/${gid}`, {
+    group_id: { stringValue: gid }, game_instance_id: { stringValue: GID },
+    status: { stringValue: 'matched' }, lead_participant_id: { stringValue: lead },
+    outcome: { nullValue: null },
+    bidder_participants: { arrayValue: { values: pids.map(p => ({ stringValue: p })) } },
+  }, ['group_id', 'game_instance_id', 'status', 'lead_participant_id', 'outcome', 'bidder_participants'])
+}
+// A fresh latecomer: confirmed-ready, unplaced (no group_id).
+const seedLatecomer = pid => restPatch(`participants/${pid}`, {
+  participant_id: { stringValue: pid }, game_instance_id: { stringValue: GID },
+  role: { stringValue: 'bidder' }, confirmed_ready_at: { timestampValue: ISO() },
+}, ['participant_id', 'game_instance_id', 'role', 'confirmed_ready_at'])
+const genCode = () => callFn('generateAttendanceCode', { _dev: { game_instance_id: GID } })
+const enterCode = (pid, code) => callFn('verifyAttendanceCode', { _test: { participant_id: pid, game_instance_id: GID }, code })
+const pollEndowed = pids => pollParticipants(ps => pids.every(id => ps.find(p => p.id === id)?.hasEndowment))
+async function readLate(pid) {
+  const d = await fsGetDoc(`participants/${pid}`)
+  const f = d?.fields ?? {}
+  const e = f.auction_endowment?.mapValue?.fields
+  return {
+    group_id: strVal(f.group_id) || null,
+    is_lead: f.is_lead?.booleanValue ?? null,
+    role: strVal(f.role),
+    absent: f.latecomer_absent?.booleanValue ?? false,
+    participant_late: f.participant_late?.booleanValue ?? false,
+    normalized_score: numVal(f.normalized_score),
+    endow: e ? { bidderIndex: numVal(e.bidderIndex), signal: numVal(e.signal), privateValue: numVal(e.privateValue), keys: Object.keys(e).sort() } : null,
+    keys: Object.keys(f).sort(),
+  }
+}
+
+async function runLatecomerScenarios() {
+  banner('LATECOMER auto-placement (spec §3, step 2)')
+
+  // ── Scenario A: joinable auction (4, not started) → placed as bidder 5, then
+  //    bids, resolves, and is scored. Plus field-parity with a matched bidder. ──
+  await seedGroupWipe('gl-a', ['la1', 'la2', 'la3', 'la4'], 'la1')
+  await pollEndowed(['la1', 'la2', 'la3', 'la4'])
+  await seedLatecomer('lx')
+  await genCode()
+  const codeA = await readAttendanceCode()
+  const rA = await enterCode('lx', codeA)
+  assert(rA.ok, `Latecomer 1 — verifyAttendanceCode succeeded after matching [${rA.status} ${rA.error ?? ''}]`)
+
+  const lx = await readLate('lx')
+  assert(lx.group_id === 'gl-a', `Latecomer 1 — placed into the joinable auction (group_id gl-a) [${lx.group_id}]`)
+  assert(lx.endow?.bidderIndex === 5, `Latecomer 1 — placed as bidder 5 (next slot after 4) [${lx.endow?.bidderIndex}]`)
+  assert(lx.endow?.signal === 2650 && lx.endow?.privateValue === 100,
+    `Latecomer 1 — endowment is EXACTLY slot 5's frozen row (signal 2650, private 100) [${lx.endow?.signal}/${lx.endow?.privateValue}]`)
+  assert(lx.is_lead === false && lx.absent === false,
+    `Latecomer 1 — not lead, not marked absent`)
+  const gA = (await readGroups()).find(g => g.id === 'gl-a')
+  assert(gA?.bidders.includes('lx') && gA.bidders.length === 5,
+    `Latecomer 1 — added to the group's bidder array, now 5 members [${gA?.bidders.length}]`)
+
+  // Test 7 — field-for-field parity with a normally-matched bidder.
+  const la4 = await readLate('la4')
+  assert(lx.role === 'bidder' && lx.group_id && lx.is_lead === false,
+    `Latecomer 7 — role/group_id/is_lead shaped like a matched bidder`)
+  assert(JSON.stringify(lx.endow?.keys) === JSON.stringify(la4.endow?.keys),
+    `Latecomer 7 — endowment map has the SAME keys as a matched bidder [${lx.endow?.keys}]`)
+  assert(lx.participant_late === false && lx.absent === false,
+    `Latecomer 7 — carries no 'late'/'absent' junk (auto-latecomer is NOT grays' 'late' bucket)`)
+
+  // Test 2 — THE CRITICAL ONE: the latecomer bids and the auction resolves with them.
+  await startAuctionFn('gl-a')
+  await pollAuction('gl-a', a => a?.status === 'open')
+  for (const [pid, amt] of [['la1', 100], ['la2', 220], ['la3', 300], ['la4', 180], ['lx', 260]]) {
+    await submitBidFn(pid, 'gl-a', amt)
+  }
+  // Force-close (default duration is 600s — the deadline-gated checkAuctionClose
+  // would otherwise never fire), then resolve.
+  await callFn('closeAuction', { _dev: { game_instance_id: GID }, group_id: 'gl-a' })
+  await checkCloseFn('lx', 'gl-a').catch(() => {})
+  await pollAuction('gl-a', a => a?.status === 'closed')
+  const lxResult = await pollStoredResult('lx')
+  assert(lxResult != null, `Latecomer 2 — the latecomer BID and the auction RESOLVED with them in it (stored result present)`)
+
+  // Test 3 — their result reaches the gradebook. scoreAndRecord is eBay's real
+  // "Score & Record" path (participation-flat → degenerate pool → normalized 0);
+  // it writes scores even when the classroom push is skipped.
+  await callFn('scoreAndRecord', { _dev: { game_instance_id: GID } })
+  const lxScored = await readLate('lx')
+  assert(lxScored.normalized_score != null,
+    `Latecomer 3 — the latecomer is SCORED into the gradebook (normalized_score present) [${lxScored.normalized_score}]`)
+
+  // ── Test 4: every auction at 5 → absent (clear terminal message, no spinner). ──
+  await seedGroupWipe('gl-full', ['fa', 'fb', 'fc', 'fd', 'fe'], 'fa')
+  await pollEndowed(['fa', 'fb', 'fc', 'fd', 'fe'])
+  await seedLatecomer('ly'); await genCode()
+  const r4 = await enterCode('ly', await readAttendanceCode())
+  assert(r4.ok, `Latecomer 4 — verifyAttendanceCode still succeeds (attendance recorded) [${r4.status}]`)
+  const ly = await readLate('ly')
+  assert(ly.group_id === null && ly.absent === true,
+    `Latecomer 4 — auction already full (5) → ABSENT (latecomer_absent, no group) — drives the terminal message`)
+
+  // ── Test 5: under 5 but clock running → absent. ──
+  await seedGroupWipe('gl-run', ['ra', 'rb', 'rc', 'rd'], 'ra')
+  await pollEndowed(['ra', 'rb', 'rc', 'rd'])
+  await startAuctionFn('gl-run')
+  await pollAuction('gl-run', a => a?.status === 'open')
+  await seedLatecomer('lz'); await genCode()
+  await enterCode('lz', await readAttendanceCode())
+  const lz = await readLate('lz')
+  assert(lz.group_id === null && lz.absent === true,
+    `Latecomer 5 — auction under 5 but clock RUNNING → ABSENT (both conditions enforced)`)
+
+  // ── Test 6: mixed — one joinable among running → the joinable one is chosen. ──
+  await seedGroupWipe('gl-open', ['oa', 'ob', 'oc', 'od'], 'oa')       // joinable (4, not started)
+  await seedGroupDirect('gl-busy', ['ba', 'bb', 'bc', 'bd'], 'ba')     // will be started
+  await pollEndowed(['oa', 'ob', 'oc', 'od', 'ba', 'bb', 'bc', 'bd'])
+  await startAuctionFn('gl-busy')
+  await pollAuction('gl-busy', a => a?.status === 'open')
+  await seedLatecomer('lw'); await genCode()
+  await enterCode('lw', await readAttendanceCode())
+  const lw = await readLate('lw')
+  assert(lw.group_id === 'gl-open',
+    `Latecomer 6 — placed into the ONLY joinable auction (gl-open), never the running one (gl-busy) [${lw.group_id}]`)
 }
 
 // ── Entry point ─────────────────────────────────────────────────────────────────
