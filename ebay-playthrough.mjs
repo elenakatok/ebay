@@ -730,6 +730,13 @@ async function main() {
   banner('Match — single-role tiling: 12 attendees → [4,4,4] (1 true no-show held back)')
   await dash.waitForSelector('button:has-text("Match Now"):not([disabled])', { timeout: 30_000 })
   await dash.click('button:has-text("Match Now")')
+  // game-ui ≥ 0.35: Match Now opens a PREVIEW (nothing is written) and the match happens on
+  // "Confirm match". Tolerant, so the harness also runs against an older dashboard.
+  const confirmMatch = dash.locator('button:has-text("Confirm match")')
+  if (await confirmMatch.waitFor({ state: 'visible', timeout: 8_000 }).then(() => true).catch(() => false)) {
+    assert((await readGroups()).length === 0, 'Matching — the preview wrote nothing (0 groups before Confirm)')
+    await confirmMatch.click()
+  }
   await pollGroups(gs => gs.length === 3, 30_000)
   const groups0 = await readGroups()
   assert(groups0.length === 3, `Matching — exactly 3 groups formed (got ${groups0.length})`)
